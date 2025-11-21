@@ -55,16 +55,14 @@ class WC_Product_Sync_Send_Receive {
     public function shop_b_url_callback() {
         $options = get_option('wc_product_sync_sender_settings');
         ?>
-        <input type="text" name="wc_product_sync_sender_settings[shop_b_url]" value="<?php echo esc_attr(isset($options['shop_b_ur
-l']) ? $options['shop_b_url'] : ''); ?>" size="50" />
+        <input type="text" name="wc_product_sync_sender_settings[shop_b_url]" value="<?php echo esc_attr(isset($options['shop_b_url']) ? $options['shop_b_url'] : ''); ?>" size="50" />
         <?php
     }
 
     public function shop_b_receiver_api_key_callback() {
         $options = get_option('wc_product_sync_sender_settings');
         ?>
-        <input type="text" name="wc_product_sync_sender_settings[shop_b_receiver_api_key]" value="<?php echo esc_attr(isset($optio
-ns['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : ''); ?>" size="50" />
+        <input type="text" name="wc_product_sync_sender_settings[shop_b_receiver_api_key]" value="<?php echo esc_attr(isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : ''); ?>" size="50" />
         <?php
     }
 
@@ -117,8 +115,7 @@ ns['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : ''); ?>" 
             </form>
             <hr>
             <h2>Sync Log</h2>
-            <textarea readonly style="width:100%;height:300px;"><?php echo esc_textarea(get_option('wc_product_sync_sender_log', '
-No logs available.')); ?></textarea>
+            <textarea readonly style="width:100%;height:300px;"><?php echo esc_textarea(get_option('wc_product_sync_sender_log', 'No logs available.')); ?></textarea>
         </div>
         <?php
     }
