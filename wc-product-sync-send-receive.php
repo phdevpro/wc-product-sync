@@ -132,7 +132,7 @@ class WC_Product_Sync_Send_Receive {
         </div>
         <script>
         (function(){
-            var job=null;var timer=null;
+            var job=null;var timer=null;var wpAjax=(typeof ajaxurl!=='undefined'?ajaxurl:'<?php echo admin_url('admin-ajax.php'); ?>');
             function startSync(){
                 var f=document.querySelector('form[action="<?php echo admin_url('admin-post.php'); ?>"]');
                 var dry=f.querySelector('[name="dry_run"]');
@@ -144,8 +144,8 @@ class WC_Product_Sync_Send_Receive {
                 data.append('dry_run',dry && dry.checked ? '1':'0');
                 data.append('product_limit',lim && lim.value ? lim.value : '0');
                 data.append('skip_image_sync',skip && skip.checked ? '1':'0');
-                fetch(ajaxurl,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
-                    if(res && res.success){job=res.data.job_id;document.getElementById('wcps-progress-status').textContent='Running';poll()} else {alert('Error starting sync')}
+                fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
+                    if(res && res.success){job=res.data.job_id;document.getElementById('wcps-progress-status').textContent='Running';poll()} else {alert(res && res.data && res.data.message ? res.data.message : 'Error starting sync')}
                 });
             }
             function cancelSync(){
@@ -154,7 +154,7 @@ class WC_Product_Sync_Send_Receive {
                 data.append('action','wc_product_sync_cancel');
                 data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
                 data.append('job_id',job);
-                fetch(ajaxurl,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
+                fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
                     if(res && res.success){document.getElementById('wcps-progress-status').textContent='Cancelling'}
                 });
             }
@@ -164,7 +164,7 @@ class WC_Product_Sync_Send_Receive {
                 data.append('action','wc_product_sync_progress');
                 data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
                 data.append('job_id',job);
-                fetch(ajaxurl,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
+                fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
                     if(res && res.success){
                         var d=res.data;var pct=d.total?Math.round((d.processed/d.total)*100):0;
                         document.getElementById('wcps-progress-bar').style.width=pct+'%';
@@ -432,7 +432,13 @@ class WC_Product_Sync_Send_Receive {
         if (!current_user_can('manage_options')) {
             wp_send_json_error(array('message' => 'not_allowed'));
         }
-        check_ajax_referer('wc_product_sync');
+        check_ajax_referer('wc_product_sync', 'security');
+        $options = get_option('wc_product_sync_sender_settings');
+        $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
+        $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
+        if (empty($shop_b_url) || empty($receiver_api_key)) {
+            wp_send_json_error(array('message' => 'Please set Shop B URL and Receiver API Key'));
+        }
         $dry = isset($_POST['dry_run']) && $_POST['dry_run'] == '1';
         $limit = isset($_POST['product_limit']) ? absint($_POST['product_limit']) : 0;
         $skip = isset($_POST['skip_image_sync']) && $_POST['skip_image_sync'] == '1';
@@ -448,7 +454,7 @@ class WC_Product_Sync_Send_Receive {
         if (!current_user_can('manage_options')) {
             wp_send_json_error(array('message' => 'not_allowed'));
         }
-        check_ajax_referer('wc_product_sync');
+        check_ajax_referer('wc_product_sync', 'security');
         $job = isset($_POST['job_id']) ? sanitize_text_field($_POST['job_id']) : '';
         if (!$job) {
             wp_send_json_error(array('message' => 'missing_job'));
@@ -464,7 +470,7 @@ class WC_Product_Sync_Send_Receive {
         if (!current_user_can('manage_options')) {
             wp_send_json_error(array('message' => 'not_allowed'));
         }
-        check_ajax_referer('wc_product_sync');
+        check_ajax_referer('wc_product_sync', 'security');
         $job = isset($_POST['job_id']) ? sanitize_text_field($_POST['job_id']) : '';
         if (!$job) {
             wp_send_json_error(array('message' => 'missing_job'));
