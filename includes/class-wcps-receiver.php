@@ -19,6 +19,7 @@ class WCPS_Receiver {
     }
 
     public static function handle_receive($request) {
+        @set_time_limit(120);
         $test_header = is_object($request) && method_exists($request, 'get_header') ? $request->get_header('X-Product-Sync-Test') : '';
         if ($test_header === '1') {
             return rest_ensure_response(array('success' => true));
@@ -91,6 +92,7 @@ class WCPS_Receiver {
             $pb = isset($b['position']) ? intval($b['position']) : 0;
             return $pa <=> $pb;
         });
+        $sorted = array_slice($sorted, 0, 2);
         $ids = array();
         foreach ($sorted as $img) {
             if (!isset($img['base64']) || !isset($img['filename'])) {

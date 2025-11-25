@@ -1,6 +1,6 @@
 <?php
 /*
-Plugin Name: WooCommerce Product Sync (Sender with Receiver)
+Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
@@ -29,7 +29,7 @@ class WC_Product_Sync_Send_Receive {
         add_action('wp_ajax_wc_product_sync_cancel', array($this, 'ajax_cancel'));
         add_action('wp_ajax_wc_product_sync_test_receiver', array($this, 'ajax_test_receiver'));
         add_action('wp_ajax_wc_product_sync_resume', array($this, 'ajax_resume'));
-        add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 4);
+        add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 5);
     }
 
     public function register_settings() {
@@ -116,6 +116,12 @@ class WC_Product_Sync_Send_Receive {
                         Skip Image Sync (only sync textual data)
                     </label>
                 </p>
+                <p>
+                    <label>
+                        Limit gallery images per product:
+                        <input type="number" name="gallery_limit" value="0" min="0" />
+                    </label>
+                </p>
                 <button type="button" id="wcps-start" class="button button-secondary">Start Sync with Progress</button>
                 <button type="button" id="wcps-cancel" class="button">Cancel Sync</button>
                 <button type="button" id="wcps-test" class="button">Test Receiver</button>
@@ -143,12 +149,14 @@ class WC_Product_Sync_Send_Receive {
                 var dry=f.querySelector('[name="dry_run"]');
                 var lim=f.querySelector('[name="product_limit"]');
                 var skip=f.querySelector('[name="skip_image_sync"]');
+                var gl=f.querySelector('[name="gallery_limit"]');
                 var data=new FormData();
                 data.append('action','wc_product_sync_start');
                 data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
                 data.append('dry_run',dry && dry.checked ? '1':'0');
                 data.append('product_limit',lim && lim.value ? lim.value : '0');
                 data.append('skip_image_sync',skip && skip.checked ? '1':'0');
+                data.append('gallery_limit',gl && gl.value ? gl.value : '0');
                 fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
                     if(res && res.success){job=res.data.job_id;document.getElementById('wcps-progress-status').textContent='Running';setStartEnabled(false);poll()} else {alert(res && res.data && res.data.message ? res.data.message : 'Error starting sync')}
                 });
@@ -250,7 +258,8 @@ class WC_Product_Sync_Send_Receive {
         $total = $this->count_products($limit);
         set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => get_current_user_id()), 12 * HOUR_IN_SECONDS);
         update_user_meta(get_current_user_id(), 'wc_product_sync_current_job', $job);
-        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip));
+        $gallery_limit = isset($_POST['gallery_limit']) ? absint($_POST['gallery_limit']) : 0;
+        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit));
         wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         wp_send_json_success(array('job_id' => $job));
     }
@@ -319,7 +328,7 @@ class WC_Product_Sync_Send_Receive {
         wp_send_json_error(array('message' => 'HTTP ' . $code . ': ' . $body));
     }
 
-    public function run_sync_event($job, $dry, $limit, $skip) {
+    public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0) {
         $options = get_option('wc_product_sync_sender_settings');
         $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
@@ -362,6 +371,7 @@ class WC_Product_Sync_Send_Receive {
                 }
                 $gallery_ids = $product->get_gallery_image_ids();
                 if (!empty($gallery_ids)) {
+                    if ($gallery_limit > 0) { $gallery_ids = array_slice($gallery_ids, 0, $gallery_limit); } else { $gallery_ids = array(); }
                     $position = 1;
                     foreach ($gallery_ids as $gid) {
                         $file_path = get_attached_file($gid);
