@@ -1,12 +1,12 @@
 <?php
 /*
 Plugin Name: WooCommerce Product Sync (Sender with Receiver)
-Plugin URI: https://example.com
+Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.0
-Author: Your Name
-Author URI: https://example.com
+Version: 2.2
+Author: Your Simone Palazzin - PHDEVPRO
+Author URI: https://phdevpro.com
 License: GPL2
 */
 
