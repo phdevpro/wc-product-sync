@@ -150,6 +150,7 @@ class WC_Product_Sync_Send_Receive {
                     <div id="wcps-progress-bar" style="height:10px;background:#4caf50;width:0%"></div>
                 </div>
                 <div id="wcps-progress-count"></div>
+                <div id="wcps-progress-eta"></div>
                 <div id="wcps-test-result" style="margin-top:6px;"></div>
             </div>
             <hr>
@@ -212,6 +213,8 @@ class WC_Product_Sync_Send_Receive {
                         document.getElementById('wcps-progress-bar').style.width=pct+'%';
                         document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total;
                         if(d.log){document.getElementById('wcps-log').value=d.log}
+                        var etaEl=document.getElementById('wcps-progress-eta');
+                        if(etaEl){etaEl.textContent = (d.eta_seconds && d.eta_seconds>0) ? ('ETA '+formatEta(d.eta_seconds)) : (d.processed>0?'Estimating...':'')}
                         if(d.status==='done'||d.status==='error'||d.status==='cancelled'){document.getElementById('wcps-progress-status').textContent=d.status;setStartEnabled(true);job=null;return}
                     }
                     timer=setTimeout(poll,2000);
@@ -229,10 +232,13 @@ class WC_Product_Sync_Send_Receive {
                         document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total;
                         if(d.log){document.getElementById('wcps-log').value=d.log}
                         document.getElementById('wcps-progress-status').textContent=d.status;
+                        var etaEl=document.getElementById('wcps-progress-eta');
+                        if(etaEl){etaEl.textContent = (d.eta_seconds && d.eta_seconds>0) ? ('ETA '+formatEta(d.eta_seconds)) : (d.processed>0?'Estimating...':'')}
                         if(d.status==='running'||d.status==='scheduled'){setStartEnabled(false);poll()} else {setStartEnabled(true)}
                     }
                 });
             }
+            function formatEta(s){s=Math.floor(s);var h=Math.floor(s/3600);var m=Math.floor((s%3600)/60);var sec=s%60;var out='';if(h>0){out+=h+'h '}out+=m+'m '+sec+'s';return out.trim()}
             document.addEventListener('DOMContentLoaded',function(){var btn=document.getElementById('wcps-start');if(btn){btn.addEventListener('click',function(e){e.preventDefault();startSync()})}var c=document.getElementById('wcps-cancel');if(c){c.addEventListener('click',function(e){e.preventDefault();cancelSync()})}var t=document.getElementById('wcps-test');if(t){t.addEventListener('click',function(e){e.preventDefault();testReceiver()})}resume()})
         })();
         </script>
@@ -359,7 +365,7 @@ class WC_Product_Sync_Send_Receive {
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
         $log = array();
         $total = $this->count_products($limit);
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => isset(get_transient('wc_product_sync_progress_' . $job)['user_id']) ? get_transient('wc_product_sync_progress_' . $job)['user_id'] : 0), 12 * HOUR_IN_SECONDS);
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => isset(get_transient('wc_product_sync_progress_' . $job)['user_id']) ? get_transient('wc_product_sync_progress_' . $job)['user_id'] : 0, 'started_at' => time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
         $args = array('post_type' => 'product', 'post_status' => 'publish');
         if ($limit > 0) { $args['posts_per_page'] = $limit; } else { $args['posts_per_page'] = -1; }
         $posts = get_posts($args);
@@ -367,7 +373,7 @@ class WC_Product_Sync_Send_Receive {
         foreach ($posts as $post) {
             $st = get_transient('wc_product_sync_progress_' . $job);
             if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
-                set_transient('wc_product_sync_progress_' . $job, array('status' => 'cancelled', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0), 12 * HOUR_IN_SECONDS);
+                set_transient('wc_product_sync_progress_' . $job, array('status' => 'cancelled', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
                 $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
                 if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
                 return;
@@ -440,7 +446,7 @@ class WC_Product_Sync_Send_Receive {
             $this->update_progress($job, $total, $processed, $log);
         }
         $st = get_transient('wc_product_sync_progress_' . $job);
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0), 12 * HOUR_IN_SECONDS);
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
         $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
         if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
     }
@@ -448,7 +454,17 @@ class WC_Product_Sync_Send_Receive {
     private function update_progress($job, $total, $processed, $log) {
         $st = get_transient('wc_product_sync_progress_' . $job);
         $uid = isset($st['user_id']) ? $st['user_id'] : 0;
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => $uid), 12 * HOUR_IN_SECONDS);
+        $started = isset($st['started_at']) ? intval($st['started_at']) : time();
+        $eta = 0;
+        if ($processed >= 5 && $total > 0) {
+            $elapsed = time() - $started;
+            if ($elapsed > 0) {
+                $avg = $elapsed / max(1, $processed);
+                $remaining = max(0, $total - $processed);
+                $eta = (int) round($avg * $remaining);
+            }
+        }
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => $uid, 'started_at' => $started, 'eta_seconds' => $eta), 12 * HOUR_IN_SECONDS);
     }
 
     private function trim_log($log) {
@@ -494,7 +510,7 @@ class WC_Product_Sync_Send_Receive {
             delete_user_meta(get_current_user_id(), 'wc_product_sync_current_job');
             wp_send_json_success(array('status' => 'idle'));
         }
-        wp_send_json_success(array('job_id' => $job, 'status' => isset($st['status']) ? $st['status'] : 'unknown', 'total' => isset($st['total']) ? $st['total'] : 0, 'processed' => isset($st['processed']) ? $st['processed'] : 0, 'log' => isset($st['log']) ? $st['log'] : ''));
+        wp_send_json_success(array('job_id' => $job, 'status' => isset($st['status']) ? $st['status'] : 'unknown', 'total' => isset($st['total']) ? $st['total'] : 0, 'processed' => isset($st['processed']) ? $st['processed'] : 0, 'log' => isset($st['log']) ? $st['log'] : '', 'eta_seconds' => isset($st['eta_seconds']) ? $st['eta_seconds'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : 0));
     }
 }
 
