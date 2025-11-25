@@ -116,11 +116,7 @@ class WCPS_Receiver {
             if (is_wp_error($attach_id) || !$attach_id) {
                 continue;
             }
-            require_once(ABSPATH . 'wp-admin/includes/image.php');
-            $attach_data = wp_generate_attachment_metadata($attach_id, $upload['file']);
-            if ($attach_data) {
-                wp_update_attachment_metadata($attach_id, $attach_data);
-            }
+            
             $ids[] = $attach_id;
         }
         return $ids;
