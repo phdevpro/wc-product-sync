@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2
+Version: 2.2.1
 Author: Your Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -37,18 +37,22 @@ class WC_Product_Sync_Send_Receive {
 
         add_settings_section(
             'wc_product_sync_sender_section',
-            'Shop B Receiver Settings',
+            'Configuration',
             null,
             $this->option_name
         );
 
-        add_settings_field(
-            'shop_b_url',
-            'Shop B URL',
-            array($this, 'shop_b_url_callback'),
-            $this->option_name,
-            'wc_product_sync_sender_section'
-        );
+        $options = get_option('wc_product_sync_sender_settings');
+        $role = isset($options['site_role']) ? $options['site_role'] : 'sender';
+        if ($role === 'sender') {
+            add_settings_field(
+                'shop_b_url',
+                'Shop B URL',
+                array($this, 'shop_b_url_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+        }
 
         add_settings_field(
             'shop_b_receiver_api_key',
@@ -88,14 +92,28 @@ class WC_Product_Sync_Send_Receive {
         ?>
         <div class="wrap">
             <h1>WooCommerce Product Sync Send/Receive Settings</h1>
+            <?php $options_banner = get_option('wc_product_sync_sender_settings'); $role_banner = isset($options_banner['site_role']) ? $options_banner['site_role'] : 'sender'; ?>
+            <div class="notice notice-info"><p><?php echo $role_banner==='receiver' ? 'This site is configured as Receiver (Site B)' : 'This site is configured as Sender (Site A)'; ?></p></div>
             <form method="post" action="options.php">
                 <?php
                 settings_fields($this->option_name);
                 do_settings_sections($this->option_name);
-                submit_button();
+                $options = get_option('wc_product_sync_sender_settings');
+                $role = isset($options['site_role']) ? $options['site_role'] : 'sender';
                 ?>
+                <h2>Site Role</h2>
+                <p>
+                    <label style="margin-right:12px;">
+                        <input type="radio" name="wc_product_sync_sender_settings[site_role]" value="sender" <?php echo $role==='sender'?'checked':''; ?> /> Sender (Site A)
+                    </label>
+                    <label>
+                        <input type="radio" name="wc_product_sync_sender_settings[site_role]" value="receiver" <?php echo $role==='receiver'?'checked':''; ?> /> Receiver (Site B)
+                    </label>
+                </p>
+                <?php submit_button(); ?>
             </form>
             <hr>
+            <?php $options = isset($options) ? $options : get_option('wc_product_sync_sender_settings'); $role = isset($options['site_role']) ? $options['site_role'] : 'sender'; if ($role === 'sender') { ?>
             <h2>Sync Products from Site A to Shop B Receiver</h2>
             <form id="wcps-progress-options" method="post">
                 <p>
@@ -137,6 +155,7 @@ class WC_Product_Sync_Send_Receive {
             <hr>
             <h2>Sync Log</h2>
             <textarea id="wcps-log" readonly style="width:100%;height:300px;"><?php echo esc_textarea(get_option('wc_product_sync_sender_log', 'No logs available.')); ?></textarea>
+            <?php } ?>
         </div>
         <script>
         (function(){
@@ -157,6 +176,7 @@ class WC_Product_Sync_Send_Receive {
                 data.append('product_limit',lim && lim.value ? lim.value : '0');
                 data.append('skip_image_sync',skip && skip.checked ? '1':'0');
                 data.append('gallery_limit',gl && gl.value ? gl.value : '0');
+                var logEl=document.getElementById('wcps-log'); if(logEl){logEl.value=''}
                 fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
                     if(res && res.success){job=res.data.job_id;document.getElementById('wcps-progress-status').textContent='Running';setStartEnabled(false);poll()} else {alert(res && res.data && res.data.message ? res.data.message : 'Error starting sync')}
                 });
@@ -230,6 +250,10 @@ class WC_Product_Sync_Send_Receive {
         if (isset($input['shop_b_receiver_api_key'])) {
             $output['shop_b_receiver_api_key'] = sanitize_text_field($input['shop_b_receiver_api_key']);
         }
+        if (isset($input['site_role'])) {
+            $role = sanitize_text_field($input['site_role']);
+            $output['site_role'] = ($role === 'receiver') ? 'receiver' : 'sender';
+        }
         return $output;
     }
 
@@ -251,6 +275,7 @@ class WC_Product_Sync_Send_Receive {
         if (empty($shop_b_url) || empty($receiver_api_key)) {
             wp_send_json_error(array('message' => 'Please set Shop B URL and Receiver API Key'));
         }
+        update_option('wc_product_sync_sender_log', '');
         $dry = isset($_POST['dry_run']) && $_POST['dry_run'] == '1';
         $limit = isset($_POST['product_limit']) ? absint($_POST['product_limit']) : 0;
         $skip = isset($_POST['skip_image_sync']) && $_POST['skip_image_sync'] == '1';
@@ -441,7 +466,9 @@ class WC_Product_Sync_Send_Receive {
     }
 
     private function menu_title() {
-        $label = 'Product Sync Send/Receive';
+        $options = get_option('wc_product_sync_sender_settings');
+        $role = isset($options['site_role']) ? $options['site_role'] : 'sender';
+        $label = $role === 'receiver' ? 'Product Sync (Receiver B)' : 'Product Sync (Sender A)';
         $job = get_user_meta(get_current_user_id(), 'wc_product_sync_current_job', true);
         if (!empty($job)) {
             $st = get_transient('wc_product_sync_progress_' . $job);
