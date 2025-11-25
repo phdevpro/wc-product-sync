@@ -26,6 +26,8 @@ class WC_Product_Sync_Send_Receive {
         add_action('wp_ajax_wc_product_sync_start', array($this, 'ajax_start_sync'));
         add_action('wp_ajax_wc_product_sync_progress', array($this, 'ajax_progress'));
         add_action('wp_ajax_wc_product_sync_cancel', array($this, 'ajax_cancel'));
+        add_action('wp_ajax_wc_product_sync_test_receiver', array($this, 'ajax_test_receiver'));
+        add_action('wp_ajax_wc_product_sync_resume', array($this, 'ajax_resume'));
         add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 4);
     }
 
@@ -73,7 +75,7 @@ class WC_Product_Sync_Send_Receive {
     public function add_admin_menu() {
         add_menu_page(
             'WC Product Sync Send/Receive',
-            'Product Sync Send/Receive',
+            $this->menu_title(),
             'manage_options',
             'wc-product-sync-send-receive',
             array($this, 'settings_page'),
@@ -118,6 +120,7 @@ class WC_Product_Sync_Send_Receive {
                 <?php submit_button('Run Product Sync'); ?>
                 <button type="button" id="wcps-start" class="button button-secondary">Start Sync with Progress</button>
                 <button type="button" id="wcps-cancel" class="button">Cancel Sync</button>
+                <button type="button" id="wcps-test" class="button">Test Receiver</button>
             </form>
             <div id="wcps-progress-wrap" style="margin-top:12px;">
                 <div id="wcps-progress-status"></div>
@@ -125,6 +128,7 @@ class WC_Product_Sync_Send_Receive {
                     <div id="wcps-progress-bar" style="height:10px;background:#4caf50;width:0%"></div>
                 </div>
                 <div id="wcps-progress-count"></div>
+                <div id="wcps-test-result" style="margin-top:6px;"></div>
             </div>
             <hr>
             <h2>Sync Log</h2>
@@ -133,6 +137,9 @@ class WC_Product_Sync_Send_Receive {
         <script>
         (function(){
             var job=null;var timer=null;var wpAjax=(typeof ajaxurl!=='undefined'?ajaxurl:'<?php echo admin_url('admin-ajax.php'); ?>');
+            function setStartEnabled(enabled){
+                var b=document.getElementById('wcps-start'); if(b){b.disabled=!enabled}
+            }
             function startSync(){
                 var f=document.querySelector('form[action="<?php echo admin_url('admin-post.php'); ?>"]');
                 var dry=f.querySelector('[name="dry_run"]');
@@ -145,7 +152,7 @@ class WC_Product_Sync_Send_Receive {
                 data.append('product_limit',lim && lim.value ? lim.value : '0');
                 data.append('skip_image_sync',skip && skip.checked ? '1':'0');
                 fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
-                    if(res && res.success){job=res.data.job_id;document.getElementById('wcps-progress-status').textContent='Running';poll()} else {alert(res && res.data && res.data.message ? res.data.message : 'Error starting sync')}
+                    if(res && res.success){job=res.data.job_id;document.getElementById('wcps-progress-status').textContent='Running';setStartEnabled(false);poll()} else {alert(res && res.data && res.data.message ? res.data.message : 'Error starting sync')}
                 });
             }
             function cancelSync(){
@@ -157,6 +164,15 @@ class WC_Product_Sync_Send_Receive {
                 fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
                     if(res && res.success){document.getElementById('wcps-progress-status').textContent='Cancelling'}
                 });
+            }
+            function testReceiver(){
+                var data=new FormData();
+                data.append('action','wc_product_sync_test_receiver');
+                data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
+                fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
+                    var el=document.getElementById('wcps-test-result');
+                    if(res && res.success){el.textContent='Receiver OK'} else {el.textContent=(res && res.data && res.data.message)?res.data.message:'Receiver test failed'}
+                }).catch(function(){document.getElementById('wcps-test-result').textContent='Receiver test failed'});
             }
             function poll(){
                 if(!job){return}
@@ -170,12 +186,28 @@ class WC_Product_Sync_Send_Receive {
                         document.getElementById('wcps-progress-bar').style.width=pct+'%';
                         document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total;
                         if(d.log){document.getElementById('wcps-log').value=d.log}
-                        if(d.status==='done'||d.status==='error'||d.status==='cancelled'){document.getElementById('wcps-progress-status').textContent=d.status;job=null;return}
+                        if(d.status==='done'||d.status==='error'||d.status==='cancelled'){document.getElementById('wcps-progress-status').textContent=d.status;setStartEnabled(true);job=null;return}
                     }
                     timer=setTimeout(poll,2000);
                 });
             }
-            document.addEventListener('DOMContentLoaded',function(){var btn=document.getElementById('wcps-start');if(btn){btn.addEventListener('click',function(e){e.preventDefault();startSync()})}var c=document.getElementById('wcps-cancel');if(c){c.addEventListener('click',function(e){e.preventDefault();cancelSync()})}})
+            function resume(){
+                var data=new FormData();
+                data.append('action','wc_product_sync_resume');
+                data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
+                fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
+                    if(res && res.success && res.data && res.data.job_id){
+                        job=res.data.job_id;
+                        var d=res.data;var pct=d.total?Math.round((d.processed/d.total)*100):0;
+                        document.getElementById('wcps-progress-bar').style.width=pct+'%';
+                        document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total;
+                        if(d.log){document.getElementById('wcps-log').value=d.log}
+                        document.getElementById('wcps-progress-status').textContent=d.status;
+                        if(d.status==='running'||d.status==='scheduled'){setStartEnabled(false);poll()} else {setStartEnabled(true)}
+                    }
+                });
+            }
+            document.addEventListener('DOMContentLoaded',function(){var btn=document.getElementById('wcps-start');if(btn){btn.addEventListener('click',function(e){e.preventDefault();startSync()})}var c=document.getElementById('wcps-cancel');if(c){c.addEventListener('click',function(e){e.preventDefault();cancelSync()})}var t=document.getElementById('wcps-test');if(t){t.addEventListener('click',function(e){e.preventDefault();testReceiver()})}resume()})
         })();
         </script>
         <?php
@@ -364,6 +396,10 @@ class WC_Product_Sync_Send_Receive {
     }
 
     public function handle_receive($request) {
+        $test_header = is_object($request) && method_exists($request, 'get_header') ? $request->get_header('X-Product-Sync-Test') : '';
+        if ($test_header === '1') {
+            return rest_ensure_response(array('success' => true));
+        }
         if (!class_exists('WooCommerce')) {
             return new WP_Error('woocommerce_required', 'WooCommerce not active', array('status' => 500));
         }
@@ -371,12 +407,18 @@ class WC_Product_Sync_Send_Receive {
         if (!is_array($data)) {
             return new WP_Error('invalid_payload', 'Invalid payload', array('status' => 400));
         }
+        if (isset($data['test']) && $data['test']) {
+            return rest_ensure_response(array('success' => true));
+        }
         $name = isset($data['name']) ? $data['name'] : '';
         $sku = isset($data['sku']) ? $data['sku'] : '';
         $regular = isset($data['regular_price']) ? $data['regular_price'] : '';
         $sale = isset($data['sale_price']) ? $data['sale_price'] : '';
         $desc = isset($data['description']) ? $data['description'] : '';
         $short = isset($data['short_description']) ? $data['short_description'] : '';
+        if ($name === '' && $sku === '') {
+            return new WP_Error('missing_identity', 'Missing product name and sku', array('status' => 400));
+        }
         $product_id = 0;
         if (!empty($sku) && function_exists('wc_get_product_id_by_sku')) {
             $product_id = wc_get_product_id_by_sku($sku);
@@ -403,6 +445,8 @@ class WC_Product_Sync_Send_Receive {
         if ($short !== '') {
             $product->set_short_description($short);
         }
+        $product->set_status('publish');
+        $product->set_catalog_visibility('visible');
         $ids = array();
         if (isset($data['images']) && is_array($data['images'])) {
             $ids = $this->import_images($data['images']);
@@ -433,6 +477,13 @@ class WC_Product_Sync_Send_Receive {
             wp_send_json_error(array('message' => 'not_allowed'));
         }
         check_ajax_referer('wc_product_sync', 'security');
+        $existing = get_user_meta(get_current_user_id(), 'wc_product_sync_current_job', true);
+        if (!empty($existing)) {
+            $st = get_transient('wc_product_sync_progress_' . $existing);
+            if ($st && isset($st['status']) && ($st['status'] === 'running' || $st['status'] === 'scheduled')) {
+                wp_send_json_error(array('message' => 'Another sync is already running', 'job_id' => $existing));
+            }
+        }
         $options = get_option('wc_product_sync_sender_settings');
         $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
@@ -444,7 +495,8 @@ class WC_Product_Sync_Send_Receive {
         $skip = isset($_POST['skip_image_sync']) && $_POST['skip_image_sync'] == '1';
         $job = uniqid('sync_', true);
         $total = $this->count_products($limit);
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => ''), 12 * HOUR_IN_SECONDS);
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => get_current_user_id()), 12 * HOUR_IN_SECONDS);
+        update_user_meta(get_current_user_id(), 'wc_product_sync_current_job', $job);
         wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip));
         wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         wp_send_json_success(array('job_id' => $job));
@@ -481,7 +533,37 @@ class WC_Product_Sync_Send_Receive {
         }
         $st['status'] = 'cancelled';
         set_transient('wc_product_sync_progress_' . $job, $st, 12 * HOUR_IN_SECONDS);
+        $uid = isset($st['user_id']) ? intval($st['user_id']) : get_current_user_id();
+        delete_user_meta($uid, 'wc_product_sync_current_job');
         wp_send_json_success(array('status' => 'cancelled'));
+    }
+
+    public function ajax_test_receiver() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'not_allowed'));
+        }
+        check_ajax_referer('wc_product_sync', 'security');
+        $options = get_option('wc_product_sync_sender_settings');
+        $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
+        $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
+        if (empty($shop_b_url) || empty($receiver_api_key)) {
+            wp_send_json_error(array('message' => 'Please set Shop B URL and Receiver API Key'));
+        }
+        $endpoint = $shop_b_url . 'wp-json/product-sync/v1/receive';
+        $resp = wp_remote_post($endpoint, array('headers' => array('Content-Type' => 'application/json', 'X-Product-Sync-Key' => $receiver_api_key, 'X-Product-Sync-Test' => '1'), 'body' => json_encode(array('test' => true)), 'timeout' => 20));
+        if (is_wp_error($resp)) {
+            wp_send_json_error(array('message' => $resp->get_error_message()));
+        }
+        $code = wp_remote_retrieve_response_code($resp);
+        $body = wp_remote_retrieve_body($resp);
+        if ($code >= 200 && $code < 300) {
+            $decoded = json_decode($body, true);
+            if (is_array($decoded) && isset($decoded['success']) && $decoded['success']) {
+                wp_send_json_success();
+            }
+            wp_send_json_error(array('message' => $body));
+        }
+        wp_send_json_error(array('message' => 'HTTP ' . $code . ': ' . $body));
     }
 
     public function run_sync_event($job, $dry, $limit, $skip) {
@@ -490,7 +572,7 @@ class WC_Product_Sync_Send_Receive {
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
         $log = array();
         $total = $this->count_products($limit);
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => 0, 'log' => ''), 12 * HOUR_IN_SECONDS);
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => isset(get_transient('wc_product_sync_progress_' . $job)['user_id']) ? get_transient('wc_product_sync_progress_' . $job)['user_id'] : 0), 12 * HOUR_IN_SECONDS);
         $args = array('post_type' => 'product', 'post_status' => 'publish');
         if ($limit > 0) { $args['posts_per_page'] = $limit; } else { $args['posts_per_page'] = -1; }
         $posts = get_posts($args);
@@ -498,7 +580,9 @@ class WC_Product_Sync_Send_Receive {
         foreach ($posts as $post) {
             $st = get_transient('wc_product_sync_progress_' . $job);
             if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
-                set_transient('wc_product_sync_progress_' . $job, array('status' => 'cancelled', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log))), 12 * HOUR_IN_SECONDS);
+                set_transient('wc_product_sync_progress_' . $job, array('status' => 'cancelled', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0), 12 * HOUR_IN_SECONDS);
+                $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
+                if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
                 return;
             }
             $product = wc_get_product($post->ID);
@@ -548,18 +632,35 @@ class WC_Product_Sync_Send_Receive {
             $receiver_endpoint = $shop_b_url . 'wp-json/product-sync/v1/receive';
             $resp = wp_remote_post($receiver_endpoint, array('headers' => array('Content-Type' => 'application/json', 'X-Product-Sync-Key' => $receiver_api_key), 'body' => json_encode($payload), 'timeout' => 60));
             if (is_wp_error($resp)) {
-                $log[] = 'Error sending ' . $product->get_name();
+                $log[] = 'Error sending ' . $product->get_name() . ': ' . $resp->get_error_message();
             } else {
-                $log[] = 'Sent ' . $product->get_name();
+                $code = wp_remote_retrieve_response_code($resp);
+                $body = wp_remote_retrieve_body($resp);
+                if ($code >= 200 && $code < 300) {
+                    $decoded = json_decode($body, true);
+                    if (is_array($decoded) && isset($decoded['success']) && $decoded['success']) {
+                        $pid = isset($decoded['product_id']) ? $decoded['product_id'] : '?';
+                        $log[] = 'Upserted ' . $product->get_name() . ' (ID ' . $pid . ')';
+                    } else {
+                        $log[] = 'Receiver error: ' . $body;
+                    }
+                } else {
+                    $log[] = 'Receiver HTTP ' . $code . ': ' . $body;
+                }
             }
             $processed++;
             $this->update_progress($job, $total, $processed, $log);
         }
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log))), 12 * HOUR_IN_SECONDS);
+        $st = get_transient('wc_product_sync_progress_' . $job);
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0), 12 * HOUR_IN_SECONDS);
+        $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
+        if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
     }
 
     private function update_progress($job, $total, $processed, $log) {
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log))), 12 * HOUR_IN_SECONDS);
+        $st = get_transient('wc_product_sync_progress_' . $job);
+        $uid = isset($st['user_id']) ? $st['user_id'] : 0;
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => $uid), 12 * HOUR_IN_SECONDS);
     }
 
     private function trim_log($log) {
@@ -574,6 +675,18 @@ class WC_Product_Sync_Send_Receive {
         if ($limit > 0) { $args['posts_per_page'] = $limit; } else { $args['posts_per_page'] = -1; }
         $posts = get_posts($args);
         return count($posts);
+    }
+
+    private function menu_title() {
+        $label = 'Product Sync Send/Receive';
+        $job = get_user_meta(get_current_user_id(), 'wc_product_sync_current_job', true);
+        if (!empty($job)) {
+            $st = get_transient('wc_product_sync_progress_' . $job);
+            if ($st && isset($st['status']) && ($st['status'] === 'running' || $st['status'] === 'scheduled')) {
+                return $label . ' <span class="update-plugins count-1"><span class="plugin-count">1</span></span>';
+            }
+        }
+        return $label;
     }
 
     private function import_images($images) {
@@ -620,3 +733,19 @@ class WC_Product_Sync_Send_Receive {
 }
 
 new WC_Product_Sync_Send_Receive();
+    public function ajax_resume() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'not_allowed'));
+        }
+        check_ajax_referer('wc_product_sync', 'security');
+        $job = get_user_meta(get_current_user_id(), 'wc_product_sync_current_job', true);
+        if (!$job) {
+            wp_send_json_success(array('status' => 'idle'));
+        }
+        $st = get_transient('wc_product_sync_progress_' . $job);
+        if (!$st) {
+            delete_user_meta(get_current_user_id(), 'wc_product_sync_current_job');
+            wp_send_json_success(array('status' => 'idle'));
+        }
+        wp_send_json_success(array('job_id' => $job, 'status' => isset($st['status']) ? $st['status'] : 'unknown', 'total' => isset($st['total']) ? $st['total'] : 0, 'processed' => isset($st['processed']) ? $st['processed'] : 0, 'log' => isset($st['log']) ? $st['log'] : ''));
+    }
