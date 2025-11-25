@@ -150,7 +150,6 @@ class WC_Product_Sync_Send_Receive {
                     <div id="wcps-progress-bar" style="height:10px;background:#4caf50;width:0%"></div>
                 </div>
                 <div id="wcps-progress-count"></div>
-                <div id="wcps-progress-eta"></div>
                 <div id="wcps-test-result" style="margin-top:6px;"></div>
             </div>
             <hr>
@@ -211,10 +210,9 @@ class WC_Product_Sync_Send_Receive {
                     if(res && res.success){
                         var d=res.data;var pct=d.total?Math.round((d.processed/d.total)*100):0;
                         document.getElementById('wcps-progress-bar').style.width=pct+'%';
-                        document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total;
+                        var etaMsg=(d.eta_seconds && d.eta_seconds>0) ? ('ETA '+formatEta(d.eta_seconds)) : (d.processed>0?'Estimating...':'');
+                        document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total + (etaMsg?(' — '+etaMsg):'');
                         if(d.log){document.getElementById('wcps-log').value=d.log}
-                        var etaEl=document.getElementById('wcps-progress-eta');
-                        if(etaEl){etaEl.textContent = (d.eta_seconds && d.eta_seconds>0) ? ('ETA '+formatEta(d.eta_seconds)) : (d.processed>0?'Estimating...':'')}
                         if(d.status==='done'||d.status==='error'||d.status==='cancelled'){document.getElementById('wcps-progress-status').textContent=d.status;setStartEnabled(true);job=null;return}
                     }
                     timer=setTimeout(poll,2000);
@@ -229,11 +227,10 @@ class WC_Product_Sync_Send_Receive {
                         job=res.data.job_id;
                         var d=res.data;var pct=d.total?Math.round((d.processed/d.total)*100):0;
                         document.getElementById('wcps-progress-bar').style.width=pct+'%';
-                        document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total;
+                        var etaMsg=(d.eta_seconds && d.eta_seconds>0) ? ('ETA '+formatEta(d.eta_seconds)) : (d.processed>0?'Estimating...':'');
+                        document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total + (etaMsg?(' — '+etaMsg):'');
                         if(d.log){document.getElementById('wcps-log').value=d.log}
                         document.getElementById('wcps-progress-status').textContent=d.status;
-                        var etaEl=document.getElementById('wcps-progress-eta');
-                        if(etaEl){etaEl.textContent = (d.eta_seconds && d.eta_seconds>0) ? ('ETA '+formatEta(d.eta_seconds)) : (d.processed>0?'Estimating...':'')}
                         if(d.status==='running'||d.status==='scheduled'){setStartEnabled(false);poll()} else {setStartEnabled(true)}
                     }
                 });
