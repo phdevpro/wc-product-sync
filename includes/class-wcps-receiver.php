@@ -69,7 +69,19 @@ class WCPS_Receiver {
         if ($short !== '') {
             $product->set_short_description($short);
         }
-        $product->set_status('publish');
+        $options = get_option('wc_product_sync_sender_settings');
+        $sync_status = isset($options['receiver_sync_status']) && $options['receiver_sync_status'];
+        if ($sync_status && isset($data['status']) && is_string($data['status'])) {
+            $status = sanitize_key($data['status']);
+            $allowed = array('publish','draft','pending','private');
+            if (in_array($status, $allowed, true)) {
+                $product->set_status($status);
+            } else {
+                $product->set_status('publish');
+            }
+        } else {
+            $product->set_status('publish');
+        }
         $product->set_catalog_visibility('visible');
         $ids = array();
         if (isset($data['images']) && is_array($data['images'])) {

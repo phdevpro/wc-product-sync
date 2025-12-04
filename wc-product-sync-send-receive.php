@@ -30,6 +30,9 @@ class WC_Product_Sync_Send_Receive {
         add_action('wp_ajax_wc_product_sync_test_receiver', array($this, 'ajax_test_receiver'));
         add_action('wp_ajax_wc_product_sync_resume', array($this, 'ajax_resume'));
         add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 5);
+        add_filter('cron_schedules', array($this, 'add_cron_schedules'));
+        add_action('init', array($this, 'ensure_scheduler'));
+        add_action('wc_product_sync_scheduler_tick', array($this, 'scheduler_tick'));
     }
 
     public function register_settings() {
@@ -49,6 +52,57 @@ class WC_Product_Sync_Send_Receive {
                 'shop_b_url',
                 'Shop B URL',
                 array($this, 'shop_b_url_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+            add_settings_field(
+                'auto_sync_enabled',
+                'Enable Auto Sync (Cron)',
+                array($this, 'auto_sync_enabled_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+            add_settings_field(
+                'auto_sync_cron',
+                'Cron Expression (m h dom mon dow)',
+                array($this, 'auto_sync_cron_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+            add_settings_field(
+                'auto_product_limit',
+                'Auto Product Limit',
+                array($this, 'auto_product_limit_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+            add_settings_field(
+                'auto_skip_image_sync',
+                'Auto Skip Image Sync',
+                array($this, 'auto_skip_image_sync_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+            add_settings_field(
+                'auto_gallery_limit',
+                'Auto Gallery Limit',
+                array($this, 'auto_gallery_limit_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+            add_settings_field(
+                'auto_dry_run',
+                'Auto Dry Run',
+                array($this, 'auto_dry_run_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+        }
+        if ($role === 'receiver') {
+            add_settings_field(
+                'receiver_sync_status',
+                'Sync status',
+                array($this, 'receiver_sync_status_callback'),
                 $this->option_name,
                 'wc_product_sync_sender_section'
             );
@@ -74,6 +128,62 @@ class WC_Product_Sync_Send_Receive {
         $options = get_option('wc_product_sync_sender_settings');
         ?>
         <input type="text" name="wc_product_sync_sender_settings[shop_b_receiver_api_key]" value="<?php echo esc_attr(isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : ''); ?>" size="50" />
+        <?php
+    }
+
+    public function auto_sync_enabled_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $val = isset($options['auto_sync_enabled']) ? (bool)$options['auto_sync_enabled'] : false;
+        ?>
+        <label><input type="checkbox" name="wc_product_sync_sender_settings[auto_sync_enabled]" value="1" <?php echo $val?'checked':''; ?> /> Enable background automatic sync</label>
+        <?php
+    }
+
+    public function auto_sync_cron_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $val = isset($options['auto_sync_cron']) ? $options['auto_sync_cron'] : '';
+        ?>
+        <input type="text" name="wc_product_sync_sender_settings[auto_sync_cron]" value="<?php echo esc_attr($val); ?>" placeholder="*/30 * * * *" size="30" />
+        <?php
+    }
+
+    public function auto_product_limit_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $val = isset($options['auto_product_limit']) ? intval($options['auto_product_limit']) : 0;
+        ?>
+        <input type="number" name="wc_product_sync_sender_settings[auto_product_limit]" value="<?php echo esc_attr($val); ?>" min="0" />
+        <?php
+    }
+
+    public function auto_skip_image_sync_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $val = isset($options['auto_skip_image_sync']) ? (bool)$options['auto_skip_image_sync'] : false;
+        ?>
+        <label><input type="checkbox" name="wc_product_sync_sender_settings[auto_skip_image_sync]" value="1" <?php echo $val?'checked':''; ?> /> Skip image sync in auto runs</label>
+        <?php
+    }
+
+    public function auto_gallery_limit_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $val = isset($options['auto_gallery_limit']) ? intval($options['auto_gallery_limit']) : 0;
+        ?>
+        <input type="number" name="wc_product_sync_sender_settings[auto_gallery_limit]" value="<?php echo esc_attr($val); ?>" min="0" />
+        <?php
+    }
+
+    public function auto_dry_run_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $val = isset($options['auto_dry_run']) ? (bool)$options['auto_dry_run'] : false;
+        ?>
+        <label><input type="checkbox" name="wc_product_sync_sender_settings[auto_dry_run]" value="1" <?php echo $val?'checked':''; ?> /> Dry run for auto sync</label>
+        <?php
+    }
+
+    public function receiver_sync_status_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $val = isset($options['receiver_sync_status']) ? (bool)$options['receiver_sync_status'] : false;
+        ?>
+        <label><input type="checkbox" name="wc_product_sync_sender_settings[receiver_sync_status]" value="1" <?php echo $val?'checked':''; ?> /> Update product status from Site A</label>
         <?php
     }
 
@@ -257,6 +367,13 @@ class WC_Product_Sync_Send_Receive {
             $role = sanitize_text_field($input['site_role']);
             $output['site_role'] = ($role === 'receiver') ? 'receiver' : 'sender';
         }
+        if (isset($input['auto_sync_enabled'])) { $output['auto_sync_enabled'] = $input['auto_sync_enabled'] ? 1 : 0; }
+        if (isset($input['auto_sync_cron'])) { $output['auto_sync_cron'] = trim(sanitize_text_field($input['auto_sync_cron'])); }
+        if (isset($input['auto_product_limit'])) { $output['auto_product_limit'] = absint($input['auto_product_limit']); }
+        if (isset($input['auto_skip_image_sync'])) { $output['auto_skip_image_sync'] = $input['auto_skip_image_sync'] ? 1 : 0; }
+        if (isset($input['auto_gallery_limit'])) { $output['auto_gallery_limit'] = absint($input['auto_gallery_limit']); }
+        if (isset($input['auto_dry_run'])) { $output['auto_dry_run'] = $input['auto_dry_run'] ? 1 : 0; }
+        if (isset($input['receiver_sync_status'])) { $output['receiver_sync_status'] = $input['receiver_sync_status'] ? 1 : 0; }
         return $output;
     }
 
@@ -384,6 +501,7 @@ class WC_Product_Sync_Send_Receive {
                 'sale_price' => $product->get_sale_price(),
                 'description' => $product->get_description(),
                 'short_description' => $product->get_short_description(),
+                'status' => method_exists($product, 'get_status') ? $product->get_status() : 'publish',
             );
             if (!$skip) {
                 $images = array();
@@ -490,6 +608,97 @@ class WC_Product_Sync_Send_Receive {
             }
         }
         return $label;
+    }
+
+    public function add_cron_schedules($schedules) {
+        $schedules['every_minute'] = array('interval' => 60, 'display' => 'Every Minute');
+        return $schedules;
+    }
+
+    public function ensure_scheduler() {
+        if (!wp_next_scheduled('wc_product_sync_scheduler_tick')) {
+            wp_schedule_event(time(), 'every_minute', 'wc_product_sync_scheduler_tick');
+        }
+    }
+
+    public function scheduler_tick() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $role = isset($options['site_role']) ? $options['site_role'] : 'sender';
+        if ($role !== 'sender') { return; }
+        $enabled = isset($options['auto_sync_enabled']) && $options['auto_sync_enabled'];
+        if (!$enabled) { return; }
+        $expr = isset($options['auto_sync_cron']) ? trim($options['auto_sync_cron']) : '';
+        if ($expr === '') { return; }
+        $now = current_time('timestamp');
+        if (!$this->cron_matches($now, $expr)) { return; }
+        $minute_key = gmdate('YmdHi', $now);
+        $last_key = get_option('wc_product_sync_last_run_min', '');
+        if ($last_key === $minute_key) { return; }
+        $auto_job = get_option('wc_product_sync_auto_job', '');
+        if (!empty($auto_job)) {
+            $st = get_transient('wc_product_sync_progress_' . $auto_job);
+            if ($st && isset($st['status']) && ($st['status'] === 'running' || $st['status'] === 'scheduled')) { return; }
+        }
+        $dry = isset($options['auto_dry_run']) && $options['auto_dry_run'];
+        $limit = isset($options['auto_product_limit']) ? absint($options['auto_product_limit']) : 0;
+        $skip = isset($options['auto_skip_image_sync']) && $options['auto_skip_image_sync'];
+        $gallery_limit = isset($options['auto_gallery_limit']) ? absint($options['auto_gallery_limit']) : 0;
+        $job = uniqid('auto_', true);
+        $total = $this->count_products($limit);
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => 0), 12 * HOUR_IN_SECONDS);
+        update_option('wc_product_sync_auto_job', $job);
+        update_option('wc_product_sync_last_run_min', $minute_key);
+        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit));
+    }
+
+    private function cron_matches($ts, $expr) {
+        $parts = preg_split('/\s+/', trim($expr));
+        if (count($parts) !== 5) { return false; }
+        $m_ok = $this->cron_field_match(intval(gmdate('i', $ts)), $parts[0], 0, 59);
+        $h_ok = $this->cron_field_match(intval(gmdate('G', $ts)), $parts[1], 0, 23);
+        $dom_ok = $this->cron_field_match(intval(gmdate('j', $ts)), $parts[2], 1, 31);
+        $mon_ok = $this->cron_field_match(intval(gmdate('n', $ts)), $parts[3], 1, 12);
+        $dow_ok = $this->cron_field_match(intval(gmdate('w', $ts)), $parts[4], 0, 6);
+        $dom_star = trim($parts[2]) === '*';
+        $dow_star = trim($parts[4]) === '*';
+        if (!$m_ok || !$h_ok || !$mon_ok) { return false; }
+        if (!$dom_star && !$dow_star) { return ($dom_ok || $dow_ok); }
+        return ($dom_ok && $dow_ok) || ($dom_star && $dow_star);
+    }
+
+    private function cron_field_match($val, $expr, $min, $max) {
+        $expr = trim($expr);
+        if ($expr === '*') { return true; }
+        $list = explode(',', $expr);
+        foreach ($list as $item) {
+            $item = trim($item);
+            if ($item === '') { continue; }
+            if (strpos($item, '/') !== false) {
+                $parts = explode('/', $item, 2);
+                $base = $parts[0];
+                $step = max(1, intval($parts[1]));
+                $range = ($base === '*') ? array($min, $max) : $this->parse_range($base, $min, $max);
+                if (!$range) { continue; }
+                for ($i = $range[0]; $i <= $range[1]; $i += $step) { if ($val === $i) { return true; } }
+            } elseif (strpos($item, '-') !== false) {
+                $range = $this->parse_range($item, $min, $max);
+                if ($range && $val >= $range[0] && $val <= $range[1]) { return true; }
+            } else {
+                if ($val === intval($item)) { return true; }
+            }
+        }
+        return false;
+    }
+
+    private function parse_range($s, $min, $max) {
+        $parts = explode('-', $s, 2);
+        if (count($parts) !== 2) { return null; }
+        $a = intval($parts[0]);
+        $b = intval($parts[1]);
+        if ($a < $min) { $a = $min; }
+        if ($b > $max) { $b = $max; }
+        if ($a > $b) { return null; }
+        return array($a, $b);
     }
 
     
