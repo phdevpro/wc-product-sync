@@ -435,6 +435,7 @@ class WC_Product_Sync_Send_Receive {
             wp_send_json_error(array('message' => 'missing_job'));
         }
         $st = get_transient('wc_product_sync_progress_' . $job);
+        wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         if (!$st) {
             wp_send_json_success(array('status' => 'unknown', 'total' => 0, 'processed' => 0, 'log' => ''));
         }
@@ -754,6 +755,7 @@ class WC_Product_Sync_Send_Receive {
             wp_send_json_success(array('status' => 'idle'));
         }
         $st = get_transient('wc_product_sync_progress_' . $job);
+        wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         if (!$st) {
             delete_user_meta(get_current_user_id(), 'wc_product_sync_current_job');
             wp_send_json_success(array('status' => 'idle'));
