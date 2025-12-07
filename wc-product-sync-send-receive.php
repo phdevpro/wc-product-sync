@@ -29,7 +29,7 @@ class WC_Product_Sync_Send_Receive {
         add_action('wp_ajax_wc_product_sync_cancel', array($this, 'ajax_cancel'));
         add_action('wp_ajax_wc_product_sync_test_receiver', array($this, 'ajax_test_receiver'));
         add_action('wp_ajax_wc_product_sync_resume', array($this, 'ajax_resume'));
-        add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 5);
+        add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 6);
         add_filter('cron_schedules', array($this, 'add_cron_schedules'));
         add_action('init', array($this, 'ensure_scheduler'));
         add_action('wc_product_sync_scheduler_tick', array($this, 'scheduler_tick'));
@@ -420,7 +420,8 @@ class WC_Product_Sync_Send_Receive {
         set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => get_current_user_id()), 12 * HOUR_IN_SECONDS);
         update_user_meta(get_current_user_id(), 'wc_product_sync_current_job', $job);
         $gallery_limit = isset($_POST['gallery_limit']) ? absint($_POST['gallery_limit']) : 0;
-        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit));
+        $batch_size = 20;
+        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size));
         wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         wp_send_json_success(array('job_id' => $job));
     }
@@ -490,19 +491,32 @@ class WC_Product_Sync_Send_Receive {
         wp_send_json_error(array('message' => 'HTTP ' . $code . ': ' . $body));
     }
 
-    public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0) {
+    public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0, $batch_size = 20) {
         $options = get_option('wc_product_sync_sender_settings');
         $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
         $log = array();
         $allow_all = $this->receiver_supports_status($shop_b_url, $receiver_api_key);
         $total = $this->count_products($limit, $allow_all);
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => isset(get_transient('wc_product_sync_progress_' . $job)['user_id']) ? get_transient('wc_product_sync_progress_' . $job)['user_id'] : 0, 'started_at' => time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
-        $args = array('post_type' => 'product');
+        $st0 = get_transient('wc_product_sync_progress_' . $job);
+        $processed = ($st0 && isset($st0['processed'])) ? intval($st0['processed']) : 0;
+        $started_at = ($st0 && isset($st0['started_at'])) ? intval($st0['started_at']) : time();
+        $user_id = ($st0 && isset($st0['user_id'])) ? $st0['user_id'] : 0;
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => $processed, 'log' => isset($st0['log']) ? $st0['log'] : '', 'user_id' => $user_id, 'started_at' => $started_at, 'eta_seconds' => isset($st0['eta_seconds']) ? $st0['eta_seconds'] : 0), 12 * HOUR_IN_SECONDS);
+        $remaining = max(0, $total - $processed);
+        if ($remaining === 0) {
+            $st = get_transient('wc_product_sync_progress_' . $job);
+            set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $processed, 'log' => isset($st['log']) ? $st['log'] : '', 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
+            $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
+            if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+            return;
+        }
+        $page = min($batch_size, $remaining);
+        $args = array('post_type' => 'product', 'orderby' => 'ID', 'order' => 'ASC');
         if ($allow_all) { $args['post_status'] = array('publish','draft','pending','private'); } else { $args['post_status'] = 'publish'; }
-        if ($limit > 0) { $args['posts_per_page'] = $limit; } else { $args['posts_per_page'] = -1; }
+        $args['posts_per_page'] = $page;
+        $args['offset'] = $processed;
         $posts = get_posts($args);
-        $processed = 0;
         foreach ($posts as $post) {
             $st = get_transient('wc_product_sync_progress_' . $job);
             if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
@@ -588,10 +602,15 @@ class WC_Product_Sync_Send_Receive {
             $processed++;
             $this->update_progress($job, $total, $processed, $log);
         }
-        $st = get_transient('wc_product_sync_progress_' . $job);
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
-        $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
-        if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+        if ($processed < $total) {
+            wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size));
+            wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
+        } else {
+            $st = get_transient('wc_product_sync_progress_' . $job);
+            set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
+            $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
+            if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+        }
     }
 
     private function update_progress($job, $total, $processed, $log) {
@@ -678,7 +697,8 @@ class WC_Product_Sync_Send_Receive {
         set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => 0), 12 * HOUR_IN_SECONDS);
         update_option('wc_product_sync_auto_job', $job);
         update_option('wc_product_sync_last_run_min', $minute_key);
-        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit));
+        $batch_size = 20;
+        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size));
     }
 
     private function cron_matches($ts, $expr) {
