@@ -6,6 +6,11 @@ class WCPS_Receiver {
             'callback' => array('WCPS_Receiver', 'handle_receive'),
             'permission_callback' => array('WCPS_Receiver', 'permission_check')
         ));
+        register_rest_route('product-sync/v1', '/config', array(
+            'methods' => 'GET',
+            'callback' => array('WCPS_Receiver', 'handle_config'),
+            'permission_callback' => array('WCPS_Receiver', 'permission_check')
+        ));
     }
 
     public static function permission_check($request) {
@@ -97,6 +102,12 @@ class WCPS_Receiver {
         return rest_ensure_response(array('success' => true, 'product_id' => $product->get_id()));
     }
 
+    public static function handle_config($request) {
+        $options = get_option('wc_product_sync_sender_settings');
+        $sync_status = isset($options['receiver_sync_status']) && $options['receiver_sync_status'];
+        return rest_ensure_response(array('sync_status' => (bool)$sync_status));
+    }
+
     private static function import_images($images) {
         $sorted = $images;
         usort($sorted, function($a, $b) {
@@ -104,7 +115,6 @@ class WCPS_Receiver {
             $pb = isset($b['position']) ? intval($b['position']) : 0;
             return $pa <=> $pb;
         });
-        $sorted = array_slice($sorted, 0, 2);
         $ids = array();
         foreach ($sorted as $img) {
             if (!isset($img['base64']) || !isset($img['filename'])) {

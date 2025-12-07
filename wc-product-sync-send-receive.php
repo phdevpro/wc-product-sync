@@ -56,6 +56,13 @@ class WC_Product_Sync_Send_Receive {
                 'wc_product_sync_sender_section'
             );
             add_settings_field(
+                'price_markup_percent',
+                'Price Markup %',
+                array($this, 'price_markup_percent_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
+            add_settings_field(
                 'auto_sync_enabled',
                 'Enable Auto Sync (Cron)',
                 array($this, 'auto_sync_enabled_callback'),
@@ -128,6 +135,14 @@ class WC_Product_Sync_Send_Receive {
         $options = get_option('wc_product_sync_sender_settings');
         ?>
         <input type="text" name="wc_product_sync_sender_settings[shop_b_receiver_api_key]" value="<?php echo esc_attr(isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : ''); ?>" size="50" />
+        <?php
+    }
+
+    public function price_markup_percent_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        $val = isset($options['price_markup_percent']) ? floatval($options['price_markup_percent']) : 0;
+        ?>
+        <input type="number" name="wc_product_sync_sender_settings[price_markup_percent]" value="<?php echo esc_attr($val); ?>" min="0" step="0.01" />
         <?php
     }
 
@@ -246,7 +261,7 @@ class WC_Product_Sync_Send_Receive {
                 </p>
                 <p>
                     <label>
-                        Limit gallery images per product:
+                        Limit gallery images per product (0 = all):
                         <input type="number" name="gallery_limit" value="0" min="0" />
                     </label>
                 </p>
@@ -374,6 +389,7 @@ class WC_Product_Sync_Send_Receive {
         if (isset($input['auto_gallery_limit'])) { $output['auto_gallery_limit'] = absint($input['auto_gallery_limit']); }
         if (isset($input['auto_dry_run'])) { $output['auto_dry_run'] = $input['auto_dry_run'] ? 1 : 0; }
         if (isset($input['receiver_sync_status'])) { $output['receiver_sync_status'] = $input['receiver_sync_status'] ? 1 : 0; }
+        if (isset($input['price_markup_percent'])) { $p = floatval($input['price_markup_percent']); if ($p < 0) { $p = 0; } $output['price_markup_percent'] = $p; }
         return $output;
     }
 
@@ -478,9 +494,11 @@ class WC_Product_Sync_Send_Receive {
         $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
         $log = array();
-        $total = $this->count_products($limit);
+        $allow_all = $this->receiver_supports_status($shop_b_url, $receiver_api_key);
+        $total = $this->count_products($limit, $allow_all);
         set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => isset(get_transient('wc_product_sync_progress_' . $job)['user_id']) ? get_transient('wc_product_sync_progress_' . $job)['user_id'] : 0, 'started_at' => time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
-        $args = array('post_type' => 'product', 'post_status' => 'publish');
+        $args = array('post_type' => 'product');
+        if ($allow_all) { $args['post_status'] = array('publish','draft','pending','private'); } else { $args['post_status'] = 'publish'; }
         if ($limit > 0) { $args['posts_per_page'] = $limit; } else { $args['posts_per_page'] = -1; }
         $posts = get_posts($args);
         $processed = 0;
@@ -494,11 +512,20 @@ class WC_Product_Sync_Send_Receive {
             }
             $product = wc_get_product($post->ID);
             if (!$product) { $log[] = 'Skipping product ID ' . $post->ID; $processed++; $this->update_progress($job, $total, $processed, $log); continue; }
+            $markup = isset($options['price_markup_percent']) ? floatval($options['price_markup_percent']) : 0;
+            $rp = $product->get_regular_price();
+            $sp = $product->get_sale_price();
+            $rp_out = $rp;
+            $sp_out = $sp;
+            if ($markup > 0) {
+                if (is_numeric($rp)) { $rp_out = number_format(floatval($rp) * (1 + ($markup/100)), 2, '.', ''); }
+                if ($sp !== '' && is_numeric($sp)) { $sp_out = number_format(floatval($sp) * (1 + ($markup/100)), 2, '.', ''); }
+            }
             $payload = array(
                 'name' => $product->get_name(),
                 'sku' => $product->get_sku(),
-                'regular_price' => $product->get_regular_price(),
-                'sale_price' => $product->get_sale_price(),
+                'regular_price' => $rp_out,
+                'sale_price' => $sp_out,
                 'description' => $product->get_description(),
                 'short_description' => $product->get_short_description(),
                 'status' => method_exists($product, 'get_status') ? $product->get_status() : 'publish',
@@ -517,7 +544,7 @@ class WC_Product_Sync_Send_Receive {
                 }
                 $gallery_ids = $product->get_gallery_image_ids();
                 if (!empty($gallery_ids)) {
-                    if ($gallery_limit > 0) { $gallery_ids = array_slice($gallery_ids, 0, $gallery_limit); } else { $gallery_ids = array(); }
+                    if ($gallery_limit > 0) { $gallery_ids = array_slice($gallery_ids, 0, $gallery_limit); }
                     $position = 1;
                     foreach ($gallery_ids as $gid) {
                         $file_path = get_attached_file($gid);
@@ -589,8 +616,9 @@ class WC_Product_Sync_Send_Receive {
         return $log;
     }
 
-    private function count_products($limit) {
-        $args = array('post_type' => 'product', 'post_status' => 'publish');
+    private function count_products($limit, $allow_all = false) {
+        $args = array('post_type' => 'product');
+        $args['post_status'] = $allow_all ? array('publish','draft','pending','private') : 'publish';
         if ($limit > 0) { $args['posts_per_page'] = $limit; } else { $args['posts_per_page'] = -1; }
         $posts = get_posts($args);
         return count($posts);
@@ -644,7 +672,8 @@ class WC_Product_Sync_Send_Receive {
         $skip = isset($options['auto_skip_image_sync']) && $options['auto_skip_image_sync'];
         $gallery_limit = isset($options['auto_gallery_limit']) ? absint($options['auto_gallery_limit']) : 0;
         $job = uniqid('auto_', true);
-        $total = $this->count_products($limit);
+        $allow_all = $this->receiver_supports_status(isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '', isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '');
+        $total = $this->count_products($limit, $allow_all);
         set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => 0), 12 * HOUR_IN_SECONDS);
         update_option('wc_product_sync_auto_job', $job);
         update_option('wc_product_sync_last_run_min', $minute_key);
@@ -699,6 +728,19 @@ class WC_Product_Sync_Send_Receive {
         if ($b > $max) { $b = $max; }
         if ($a > $b) { return null; }
         return array($a, $b);
+    }
+
+    private function receiver_supports_status($shop_b_url, $receiver_api_key) {
+        if (empty($shop_b_url) || empty($receiver_api_key)) { return false; }
+        $endpoint = trailingslashit($shop_b_url) . 'wp-json/product-sync/v1/config';
+        $resp = wp_remote_get($endpoint, array('headers' => array('X-Product-Sync-Key' => $receiver_api_key), 'timeout' => 10));
+        if (is_wp_error($resp)) { return false; }
+        $code = wp_remote_retrieve_response_code($resp);
+        if ($code < 200 || $code >= 300) { return false; }
+        $body = wp_remote_retrieve_body($resp);
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded)) { return false; }
+        return !empty($decoded['sync_status']);
     }
 
     
