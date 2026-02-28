@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.3
+Version: 2.2.4
 Author: Your Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -104,6 +104,13 @@ class WC_Product_Sync_Send_Receive {
                 $this->option_name,
                 'wc_product_sync_sender_section'
             );
+            add_settings_field(
+                'auto_compress_images',
+                'Compress Images (Send Large)',
+                array($this, 'auto_compress_images_callback'),
+                $this->option_name,
+                'wc_product_sync_sender_section'
+            );
         }
         if ($role === 'receiver') {
             add_settings_field(
@@ -194,6 +201,15 @@ class WC_Product_Sync_Send_Receive {
         <?php
     }
 
+    public function auto_compress_images_callback() {
+        $options = get_option('wc_product_sync_sender_settings');
+        // Default to true
+        $val = isset($options['auto_compress_images']) ? (bool)$options['auto_compress_images'] : true;
+        ?>
+        <label><input type="checkbox" name="wc_product_sync_sender_settings[auto_compress_images]" value="1" <?php echo $val?'checked':''; ?> /> Send compressed 'large' image sizes instead of originals</label>
+        <?php
+    }
+
     public function receiver_sync_status_callback() {
         $options = get_option('wc_product_sync_sender_settings');
         $val = isset($options['receiver_sync_status']) ? (bool)$options['receiver_sync_status'] : false;
@@ -261,6 +277,13 @@ class WC_Product_Sync_Send_Receive {
                 </p>
                 <p>
                     <label>
+                        <?php $comp = isset($options['auto_compress_images']) ? (bool)$options['auto_compress_images'] : true; ?>
+                        <input type="checkbox" name="compress_images_sync" value="1" <?php echo $comp?'checked':''; ?> />
+                        Compress Images (Send Large)
+                    </label>
+                </p>
+                <p>
+                    <label>
                         Limit gallery images per product (0 = all):
                         <input type="number" name="gallery_limit" value="0" min="0" />
                     </label>
@@ -293,6 +316,7 @@ class WC_Product_Sync_Send_Receive {
                 var dry=f.querySelector('[name="dry_run"]');
                 var lim=f.querySelector('[name="product_limit"]');
                 var skip=f.querySelector('[name="skip_image_sync"]');
+                var comp=f.querySelector('[name="compress_images_sync"]');
                 var gl=f.querySelector('[name="gallery_limit"]');
                 var data=new FormData();
                 data.append('action','wc_product_sync_start');
@@ -300,6 +324,7 @@ class WC_Product_Sync_Send_Receive {
                 data.append('dry_run',dry && dry.checked ? '1':'0');
                 data.append('product_limit',lim && lim.value ? lim.value : '0');
                 data.append('skip_image_sync',skip && skip.checked ? '1':'0');
+                data.append('compress_images_sync',comp && comp.checked ? '1':'0');
                 data.append('gallery_limit',gl && gl.value ? gl.value : '0');
                 var logEl=document.getElementById('wcps-log'); if(logEl){logEl.value=''}
                 fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
@@ -388,6 +413,7 @@ class WC_Product_Sync_Send_Receive {
         if (isset($input['auto_skip_image_sync'])) { $output['auto_skip_image_sync'] = $input['auto_skip_image_sync'] ? 1 : 0; }
         if (isset($input['auto_gallery_limit'])) { $output['auto_gallery_limit'] = absint($input['auto_gallery_limit']); }
         if (isset($input['auto_dry_run'])) { $output['auto_dry_run'] = $input['auto_dry_run'] ? 1 : 0; }
+        $output['auto_compress_images'] = isset($input['auto_compress_images']) ? ($input['auto_compress_images'] ? 1 : 0) : 0;
         if (isset($input['receiver_sync_status'])) { $output['receiver_sync_status'] = $input['receiver_sync_status'] ? 1 : 0; }
         if (isset($input['price_markup_percent'])) { $p = floatval($input['price_markup_percent']); if ($p < 0) { $p = 0; } $output['price_markup_percent'] = $p; }
         return $output;
@@ -415,13 +441,14 @@ class WC_Product_Sync_Send_Receive {
         $dry = isset($_POST['dry_run']) && $_POST['dry_run'] == '1';
         $limit = isset($_POST['product_limit']) ? absint($_POST['product_limit']) : 0;
         $skip = isset($_POST['skip_image_sync']) && $_POST['skip_image_sync'] == '1';
+        $compress = isset($_POST['compress_images_sync']) && $_POST['compress_images_sync'] == '1';
         $job = uniqid('sync_', true);
         $total = $this->count_products($limit);
         set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => get_current_user_id()), 12 * HOUR_IN_SECONDS);
         update_user_meta(get_current_user_id(), 'wc_product_sync_current_job', $job);
         $gallery_limit = isset($_POST['gallery_limit']) ? absint($_POST['gallery_limit']) : 0;
         $batch_size = 20;
-        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size));
+        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, $compress));
         wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         wp_send_json_success(array('job_id' => $job));
     }
@@ -491,8 +518,9 @@ class WC_Product_Sync_Send_Receive {
         wp_send_json_error(array('message' => 'HTTP ' . $code . ': ' . $body));
     }
 
-    public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0, $batch_size = 20) {
+    public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0, $batch_size = 20, $compress_manual = null) {
         $options = get_option('wc_product_sync_sender_settings');
+        $compress = $compress_manual !== null ? $compress_manual : (isset($options['auto_compress_images']) ? (bool)$options['auto_compress_images'] : true);
         $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
         $log = array();
@@ -546,31 +574,60 @@ class WC_Product_Sync_Send_Receive {
             );
             if (!$skip) {
                 $images = array();
-                $image_id = $product->get_image_id();
-                if ($image_id) {
-                    $file_path = get_attached_file($image_id);
-                    if ($file_path && file_exists($file_path)) {
-                        $image_data = file_get_contents($file_path);
-                        if ($image_data !== false) {
-                            $images[] = array('filename' => basename($file_path), 'base64' => base64_encode($image_data), 'position' => 0);
-                        }
-                    }
+                $image_ids_to_process = array();
+                
+                $main_image_id = $product->get_image_id();
+                if ($main_image_id) {
+                    $image_ids_to_process[] = array('id' => $main_image_id, 'position' => 0);
                 }
+                
                 $gallery_ids = $product->get_gallery_image_ids();
                 if (!empty($gallery_ids)) {
                     if ($gallery_limit > 0) { $gallery_ids = array_slice($gallery_ids, 0, $gallery_limit); }
                     $position = 1;
                     foreach ($gallery_ids as $gid) {
-                        $file_path = get_attached_file($gid);
-                        if ($file_path && file_exists($file_path)) {
-                            $image_data = file_get_contents($file_path);
-                            if ($image_data !== false) {
-                                $images[] = array('filename' => basename($file_path), 'base64' => base64_encode($image_data), 'position' => $position);
-                                $position++;
+                        $image_ids_to_process[] = array('id' => $gid, 'position' => $position);
+                        $position++;
+                    }
+                }
+                
+                foreach ($image_ids_to_process as $img_task) {
+                    $aid = $img_task['id'];
+                    $pos = $img_task['position'];
+                    $file_path = false;
+                    
+                    if ($compress) {
+                        $image_src = image_downsize($aid, 'large');
+                        if ($image_src && isset($image_src[0])) {
+                            $parsed_url = wp_parse_url($image_src[0]);
+                            $upload_dir = wp_upload_dir();
+                            $baseurl_parsed = wp_parse_url($upload_dir['baseurl']);
+                            
+                            if (isset($parsed_url['path']) && isset($baseurl_parsed['path'])) {
+                                $relative_path = substr($parsed_url['path'], strlen($baseurl_parsed['path']) + 1);
+                                $potential_path = trailingslashit($upload_dir['basedir']) . $relative_path;
+                                if (file_exists($potential_path)) {
+                                    $file_path = $potential_path;
+                                }
                             }
+                        }
+                        if (!$file_path) {
+                            $log[] = 'Note: Could not find compress ("large") size for attachment ' . $aid . ', falling back to original size.';
+                        }
+                    }
+                    
+                    if (!$file_path) {
+                        $file_path = get_attached_file($aid);
+                    }
+                    
+                    if ($file_path && file_exists($file_path)) {
+                        $image_data = file_get_contents($file_path);
+                        if ($image_data !== false) {
+                            $images[] = array('filename' => basename($file_path), 'base64' => base64_encode($image_data), 'position' => $pos);
                         }
                     }
                 }
+                
                 if (!empty($images)) { $payload['images'] = $images; }
             }
             if ($dry) {
@@ -602,7 +659,13 @@ class WC_Product_Sync_Send_Receive {
             $this->update_progress($job, $total, $processed, $log);
         }
         if ($processed < $total) {
-            wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size));
+            $st = get_transient('wc_product_sync_progress_' . $job);
+            if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
+                $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
+                if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+                return;
+            }
+            wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, $compress_manual));
             wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         } else {
             $st = get_transient('wc_product_sync_progress_' . $job);
@@ -697,7 +760,7 @@ class WC_Product_Sync_Send_Receive {
         update_option('wc_product_sync_auto_job', $job);
         update_option('wc_product_sync_last_run_min', $minute_key);
         $batch_size = 20;
-        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size));
+        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, null));
     }
 
     private function cron_matches($ts, $expr) {
