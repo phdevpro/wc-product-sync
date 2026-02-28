@@ -4,8 +4,8 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.6
-Author: Your Simone Palazzin - PHDEVPRO
+Version: 2.2.7
+Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
 */
@@ -29,6 +29,7 @@ class WC_Product_Sync_Send_Receive {
         add_action('wp_ajax_wc_product_sync_cancel', array($this, 'ajax_cancel'));
         add_action('wp_ajax_wc_product_sync_test_receiver', array($this, 'ajax_test_receiver'));
         add_action('wp_ajax_wc_product_sync_resume', array($this, 'ajax_resume'));
+        add_action('wp_ajax_wc_product_sync_purge_receiver', array($this, 'ajax_purge_receiver'));
         add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 7);
         add_filter('cron_schedules', array($this, 'add_cron_schedules'));
         add_action('init', array($this, 'ensure_scheduler'));
@@ -303,11 +304,43 @@ class WC_Product_Sync_Send_Receive {
             <hr>
             <h2>Sync Log</h2>
             <textarea id="wcps-log" readonly style="width:100%;height:300px;"><?php echo esc_textarea(get_option('wc_product_sync_sender_log', 'No logs available.')); ?></textarea>
+            <?php } else { ?>
+            <h2>Receiver Utilities</h2>
+            <div class="notice notice-warning inline"><p><strong>Warning:</strong> The following tool will irreversibly delete ALL products currently listed on this site, and force-purge any image attachments that contain synced MD5 deduplication hashes from the media library. Only use this if you want to start a completely fresh sync!</p></div>
+            <p><button type="button" id="wcps-purge" class="button button-primary" style="background: #dc3232; border-color: #dc3232; text-shadow: none;">Permanently Delete All Synced Products & Images</button></p>
+            <div id="wcps-purge-result" style="margin-top:6px; font-weight: bold;"></div>
             <?php } ?>
         </div>
         <script>
         (function(){
             var job=null;var timer=null;var wpAjax=(typeof ajaxurl!=='undefined'?ajaxurl:'<?php echo admin_url('admin-ajax.php'); ?>');
+            
+            var purgeBtn=document.getElementById('wcps-purge');
+            if(purgeBtn){
+                purgeBtn.addEventListener('click', function(){
+                    if(!confirm('Are you ABSOLUTELY sure? This will permanently delete ALL products and synced images on this site.')) return;
+                    var resEl=document.getElementById('wcps-purge-result');
+                    resEl.innerHTML='Deleting products and images... Please wait (this may take a while).';
+                    purgeBtn.disabled=true;
+                    
+                    var data=new FormData();
+                    data.append('action','wc_product_sync_purge_receiver');
+                    data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
+                    
+                    fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
+                        purgeBtn.disabled=false;
+                        if(res.success){
+                            resEl.innerHTML='<span style="color:green;">Success: ' + res.data.message + '</span>';
+                        }else{
+                            resEl.innerHTML='<span style="color:red;">Error: ' + res.data.message + '</span>';
+                        }
+                    }).catch(function(e){
+                        purgeBtn.disabled=false;
+                        resEl.innerHTML='<span style="color:red;">Network Error or Timeout. Check network tab.</span>';
+                    });
+                });
+            }
+
             function setStartEnabled(enabled){
                 var b=document.getElementById('wcps-start'); if(b){b.disabled=!enabled}
             }
@@ -488,6 +521,50 @@ class WC_Product_Sync_Send_Receive {
         $uid = isset($st['user_id']) ? intval($st['user_id']) : get_current_user_id();
         delete_user_meta($uid, 'wc_product_sync_current_job');
         wp_send_json_success(array('status' => 'cancelled'));
+    }
+
+    public function ajax_purge_receiver() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'not_allowed'));
+        }
+        check_ajax_referer('wc_product_sync', 'security');
+        
+        $options = get_option('wc_product_sync_sender_settings');
+        if (!isset($options['site_role']) || $options['site_role'] !== 'receiver') {
+            wp_send_json_error(array('message' => 'Purge is only available when configured as a Receiver.'));
+        }
+        
+        global $wpdb;
+        
+        // 1. Delete all attachments previously synced by us (they have _wcps_image_md5 metadata)
+        $attachments = $wpdb->get_col("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wcps_image_md5'");
+        $deleted_images = 0;
+        if (!empty($attachments)) {
+            foreach ($attachments as $attach_id) {
+                if (wp_delete_attachment($attach_id, true)) {
+                    $deleted_images++;
+                }
+            }
+        }
+        
+        // 2. Delete all products
+        $args = array(
+            'post_type' => 'product',
+            'posts_per_page' => -1,
+            'post_status' => 'any',
+            'fields' => 'ids'
+        );
+        $products = get_posts($args);
+        $deleted_products = 0;
+        if (!empty($products)) {
+            foreach ($products as $product_id) {
+                if (wp_delete_post($product_id, true)) {
+                    $deleted_products++;
+                }
+            }
+        }
+        
+        wp_send_json_success(array('message' => sprintf('Successfully deleted %d WooCommerce products and %d synced images.', $deleted_products, $deleted_images)));
     }
 
     public function ajax_test_receiver() {
