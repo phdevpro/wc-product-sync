@@ -29,7 +29,7 @@ class WC_Product_Sync_Send_Receive {
         add_action('wp_ajax_wc_product_sync_cancel', array($this, 'ajax_cancel'));
         add_action('wp_ajax_wc_product_sync_test_receiver', array($this, 'ajax_test_receiver'));
         add_action('wp_ajax_wc_product_sync_resume', array($this, 'ajax_resume'));
-        add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 6);
+        add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 7);
         add_filter('cron_schedules', array($this, 'add_cron_schedules'));
         add_action('init', array($this, 'ensure_scheduler'));
         add_action('wc_product_sync_scheduler_tick', array($this, 'scheduler_tick'));
@@ -519,7 +519,8 @@ class WC_Product_Sync_Send_Receive {
     }
 
     public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0, $batch_size = 20, $compress_manual = null) {
-        $options = get_option('wc_product_sync_sender_settings');
+        try {
+            $options = get_option('wc_product_sync_sender_settings');
         $compress = $compress_manual !== null ? $compress_manual : (isset($options['auto_compress_images']) ? (bool)$options['auto_compress_images'] : true);
         $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
@@ -697,9 +698,20 @@ class WC_Product_Sync_Send_Receive {
             wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         } else {
             $st = get_transient('wc_product_sync_progress_' . $job);
-            set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
+            set_transient('wc_product_sync_progress_' . $job, array('status' => 'done', 'total' => $total, 'processed' => $total, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
             $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
             if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+            
+            $existing_log = get_option('wc_product_sync_sender_log', '');
+            update_option('wc_product_sync_sender_log', $existing_log . "\nSync job completed successfully.");
+        }
+        } catch (\Throwable $e) {
+            $err_msg = "[FATAL ERROR in run_sync_event]: " . $e->getMessage() . " in " . $e->getFile() . " on line " . $e->getLine();
+            $existing_log = get_option('wc_product_sync_sender_log', '');
+            update_option('wc_product_sync_sender_log', $err_msg . "\n" . $existing_log);
+            
+            // Mark job as failed so UI doesn't hang forever
+            set_transient('wc_product_sync_progress_' . $job, array('status' => 'cancelled', 'total' => 0, 'processed' => 0, 'log' => $err_msg, 'user_id' => 0, 'started_at' => time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
         }
     }
 
