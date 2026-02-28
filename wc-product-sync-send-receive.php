@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.2
+Version: 2.2.3
 Author: Your Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -520,7 +520,6 @@ class WC_Product_Sync_Send_Receive {
         foreach ($posts as $post) {
             $st = get_transient('wc_product_sync_progress_' . $job);
             if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
-                set_transient('wc_product_sync_progress_' . $job, array('status' => 'cancelled', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => isset($st['user_id']) ? $st['user_id'] : 0, 'started_at' => isset($st['started_at']) ? $st['started_at'] : time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
                 $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
                 if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
                 return;
