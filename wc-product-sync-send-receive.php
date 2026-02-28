@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.4
+Version: 2.2.5
 Author: Your Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -595,29 +595,57 @@ class WC_Product_Sync_Send_Receive {
                     $aid = $img_task['id'];
                     $pos = $img_task['position'];
                     $file_path = false;
+                    $orig_path = get_attached_file($aid);
                     
-                    if ($compress) {
-                        $image_src = image_downsize($aid, 'large');
-                        if ($image_src && isset($image_src[0])) {
-                            $parsed_url = wp_parse_url($image_src[0]);
-                            $upload_dir = wp_upload_dir();
-                            $baseurl_parsed = wp_parse_url($upload_dir['baseurl']);
-                            
-                            if (isset($parsed_url['path']) && isset($baseurl_parsed['path'])) {
-                                $relative_path = substr($parsed_url['path'], strlen($baseurl_parsed['path']) + 1);
-                                $potential_path = trailingslashit($upload_dir['basedir']) . $relative_path;
-                                if (file_exists($potential_path)) {
-                                    $file_path = $potential_path;
+                    if ($compress && $orig_path && file_exists($orig_path)) {
+                        $meta = wp_get_attachment_metadata($aid);
+                        $has_large = false;
+                        
+                        if (is_array($meta) && isset($meta['sizes']['large']['file'])) {
+                            $large_path = dirname($orig_path) . '/' . $meta['sizes']['large']['file'];
+                            if (file_exists($large_path)) {
+                                $file_path = $large_path;
+                                $has_large = true;
+                            }
+                        }
+                        
+                        // Dynamically generate 'large' thumbnail if missing and Image is big enough
+                        if (!$has_large) {
+                            $editor = wp_get_image_editor($orig_path);
+                            if (!is_wp_error($editor)) {
+                                $size = $editor->get_size();
+                                $max_w = (int) get_option('large_size_w', 1024);
+                                $max_h = (int) get_option('large_size_h', 1024);
+                                
+                                if ($max_w > 0 && $max_h > 0 && ((isset($size['width']) && $size['width'] > $max_w) || (isset($size['height']) && $size['height'] > $max_h))) {
+                                    $editor->resize($max_w, $max_h, false);
+                                    $resized = $editor->save();
+                                    
+                                    if (!is_wp_error($resized) && isset($resized['path'])) {
+                                        $file_path = $resized['path'];
+                                        if (!is_array($meta)) { $meta = array(); }
+                                        if (!isset($meta['sizes'])) { $meta['sizes'] = array(); }
+                                        $meta['sizes']['large'] = array(
+                                            'file' => $resized['file'],
+                                            'width' => $resized['width'],
+                                            'height' => $resized['height'],
+                                            'mime-type' => $resized['mime-type']
+                                        );
+                                        wp_update_attachment_metadata($aid, $meta);
+                                        $log[] = 'Generated missing "large" size for attachment ' . $aid;
+                                        $has_large = true;
+                                    }
                                 }
                             }
                         }
-                        if (!$file_path) {
-                            $log[] = 'Note: Could not find compress ("large") size for attachment ' . $aid . ', falling back to original size.';
+                        
+                        if (!$has_large) {
+                            $log[] = 'Note: Could not compress attachment ' . $aid . ' (maybe image is already small or format unsupported), using original.';
                         }
                     }
                     
                     if (!$file_path) {
-                        $file_path = get_attached_file($aid);
+                        $file_path = $orig_path;
                     }
                     
                     if ($file_path && file_exists($file_path)) {
