@@ -88,6 +88,12 @@ class WCPS_Receiver {
             $product->set_status('publish');
         }
         $product->set_catalog_visibility('visible');
+        
+        $old_image_ids = array_filter(array_merge(
+            array($product->get_image_id()),
+            (array)$product->get_gallery_image_ids()
+        ));
+
         $ids = array();
         if (isset($data['images']) && is_array($data['images'])) {
             $ids = self::import_images($data['images']);
@@ -95,7 +101,18 @@ class WCPS_Receiver {
                 $product->set_image_id($ids[0]);
                 if (count($ids) > 1) {
                     $product->set_gallery_image_ids(array_slice($ids, 1));
+                } else {
+                    $product->set_gallery_image_ids(array());
                 }
+            } else {
+                $product->set_image_id('');
+                $product->set_gallery_image_ids(array());
+            }
+
+            // Delete old images replaced by the sync
+            $to_delete = array_diff($old_image_ids, $ids);
+            foreach ($to_delete as $del_id) {
+                wp_delete_attachment($del_id, true);
             }
         }
         $product->save();
@@ -124,6 +141,26 @@ class WCPS_Receiver {
             if ($decoded === false) {
                 continue;
             }
+            
+            global $wpdb;
+            $md5 = md5($decoded);
+            $existing = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value = %s LIMIT 1",
+                '_wcps_image_md5',
+                $md5
+            ));
+            
+            if ($existing) {
+                // Verify the attachment actually still exists (in case postmeta is orphaned)
+                $is_valid = $wpdb->get_var($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE ID = %d AND post_type = 'attachment'", $existing));
+                if ($is_valid) {
+                    $ids[] = $existing;
+                    continue;
+                } else {
+                    $wpdb->delete($wpdb->postmeta, array('post_id' => $existing, 'meta_key' => '_wcps_image_md5'));
+                }
+            }
+
             $filename = sanitize_file_name($img['filename']);
             $upload = wp_upload_bits($filename, null, $decoded);
             if (!empty($upload['error'])) {
@@ -141,6 +178,7 @@ class WCPS_Receiver {
                 continue;
             }
             
+            update_post_meta($attach_id, '_wcps_image_md5', $md5);
             $ids[] = $attach_id;
         }
         return $ids;
