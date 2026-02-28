@@ -178,6 +178,12 @@ class WCPS_Receiver {
                 continue;
             }
             
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+            $attach_data = wp_generate_attachment_metadata($attach_id, $upload['file']);
+            if (!empty($attach_data)) {
+                wp_update_attachment_metadata($attach_id, $attach_data);
+            }
+            
             update_post_meta($attach_id, '_wcps_image_md5', $md5);
             $ids[] = $attach_id;
         }

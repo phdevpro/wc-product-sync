@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.5
+Version: 2.2.6
 Author: Your Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
