@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.7
+Version: 2.2.9
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -320,24 +320,37 @@ class WC_Product_Sync_Send_Receive {
                 purgeBtn.addEventListener('click', function(){
                     if(!confirm('Are you ABSOLUTELY sure? This will permanently delete ALL products and synced images on this site.')) return;
                     var resEl=document.getElementById('wcps-purge-result');
-                    resEl.innerHTML='Deleting products and images... Please wait (this may take a while).';
+                    resEl.innerHTML='Starting purge...';
                     purgeBtn.disabled=true;
                     
-                    var data=new FormData();
-                    data.append('action','wc_product_sync_purge_receiver');
-                    data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
+                    function doPurgeStep(step, processed_images, processed_products) {
+                        var data=new FormData();
+                        data.append('action','wc_product_sync_purge_receiver');
+                        data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
+                        data.append('step', step);
+                        data.append('processed_images', processed_images);
+                        data.append('processed_products', processed_products);
+                        
+                        fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
+                            if(res.success){
+                                resEl.innerHTML='<span style="color:#0073aa;">'+res.data.message+'</span>';
+                                if (res.data.next_step) {
+                                    doPurgeStep(res.data.next_step, res.data.processed_images, res.data.processed_products);
+                                } else {
+                                    purgeBtn.disabled=false;
+                                    resEl.innerHTML='<span style="color:green;">Success: ' + res.data.message + '</span>';
+                                }
+                            }else{
+                                purgeBtn.disabled=false;
+                                resEl.innerHTML='<span style="color:red;">Error: ' + res.data.message + '</span>';
+                            }
+                        }).catch(function(e){
+                            purgeBtn.disabled=false;
+                            resEl.innerHTML='<span style="color:red;">Network Error or Timeout. Check network tab.</span>';
+                        });
+                    }
                     
-                    fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
-                        purgeBtn.disabled=false;
-                        if(res.success){
-                            resEl.innerHTML='<span style="color:green;">Success: ' + res.data.message + '</span>';
-                        }else{
-                            resEl.innerHTML='<span style="color:red;">Error: ' + res.data.message + '</span>';
-                        }
-                    }).catch(function(e){
-                        purgeBtn.disabled=false;
-                        resEl.innerHTML='<span style="color:red;">Network Error or Timeout. Check network tab.</span>';
-                    });
+                    doPurgeStep(1, 0, 0);
                 });
             }
 
@@ -535,36 +548,67 @@ class WC_Product_Sync_Send_Receive {
         }
         
         global $wpdb;
+        $step = isset($_POST['step']) ? intval($_POST['step']) : 1;
+        $processed_images = isset($_POST['processed_images']) ? intval($_POST['processed_images']) : 0;
+        $processed_products = isset($_POST['processed_products']) ? intval($_POST['processed_products']) : 0;
+        $batch_size = 50;
         
-        // 1. Delete all attachments previously synced by us (they have _wcps_image_md5 metadata)
-        $attachments = $wpdb->get_col("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wcps_image_md5'");
-        $deleted_images = 0;
-        if (!empty($attachments)) {
-            foreach ($attachments as $attach_id) {
-                if (wp_delete_attachment($attach_id, true)) {
-                    $deleted_images++;
+        if ($step === 1) {
+            // Delete attachments
+            $attachments = $wpdb->get_col($wpdb->prepare("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wcps_image_md5' LIMIT %d", $batch_size));
+            if (!empty($attachments)) {
+                foreach ($attachments as $attach_id) {
+                    if (wp_delete_attachment($attach_id, true)) {
+                        $processed_images++;
+                    } else {
+                        // Failsafe so we don't infinitely loop on undeletable ghost attachments
+                        $wpdb->delete($wpdb->postmeta, array('post_id' => $attach_id, 'meta_key' => '_wcps_image_md5'));
+                    }
                 }
+                wp_send_json_success(array(
+                    'message' => sprintf('Deleted %d images so far...', $processed_images),
+                    'next_step' => 1,
+                    'processed_images' => $processed_images,
+                    'processed_products' => $processed_products
+                ));
+            } else {
+                // Done with images, move to products
+                wp_send_json_success(array(
+                    'message' => 'Finished deleting images. Starting to delete WC products...',
+                    'next_step' => 2,
+                    'processed_images' => $processed_images,
+                    'processed_products' => $processed_products
+                ));
+            }
+        } elseif ($step === 2) {
+            // Delete products
+            $args = array(
+                'post_type' => 'product',
+                'posts_per_page' => $batch_size,
+                'post_status' => 'any',
+                'fields' => 'ids'
+            );
+            $products = get_posts($args);
+            if (!empty($products)) {
+                foreach ($products as $product_id) {
+                    if (wp_delete_post($product_id, true)) {
+                        $processed_products++;
+                    }
+                }
+                wp_send_json_success(array(
+                    'message' => sprintf('Deleted %d images and %d products so far...', $processed_images, $processed_products),
+                    'next_step' => 2,
+                    'processed_images' => $processed_images,
+                    'processed_products' => $processed_products
+                ));
+            } else {
+                // Done with everything
+                wp_send_json_success(array(
+                    'message' => sprintf('Successfully deleted %d WooCommerce products and %d synced images.', $processed_products, $processed_images),
+                    'next_step' => 0
+                ));
             }
         }
-        
-        // 2. Delete all products
-        $args = array(
-            'post_type' => 'product',
-            'posts_per_page' => -1,
-            'post_status' => 'any',
-            'fields' => 'ids'
-        );
-        $products = get_posts($args);
-        $deleted_products = 0;
-        if (!empty($products)) {
-            foreach ($products as $product_id) {
-                if (wp_delete_post($product_id, true)) {
-                    $deleted_products++;
-                }
-            }
-        }
-        
-        wp_send_json_success(array('message' => sprintf('Successfully deleted %d WooCommerce products and %d synced images.', $deleted_products, $deleted_images)));
     }
 
     public function ajax_test_receiver() {
