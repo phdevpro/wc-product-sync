@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.9
+Version: 2.2.10
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -490,7 +490,7 @@ class WC_Product_Sync_Send_Receive {
         $compress = isset($_POST['compress_images_sync']) && $_POST['compress_images_sync'] == '1';
         $job = uniqid('sync_', true);
         $total = $this->count_products($limit);
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => '', 'user_id' => get_current_user_id()), 12 * HOUR_IN_SECONDS);
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'scheduled', 'total' => $total, 'processed' => 0, 'log' => 'Job scheduled. Waking up background worker...', 'user_id' => get_current_user_id()), 12 * HOUR_IN_SECONDS);
         update_user_meta(get_current_user_id(), 'wc_product_sync_current_job', $job);
         $gallery_limit = isset($_POST['gallery_limit']) ? absint($_POST['gallery_limit']) : 0;
         $batch_size = 20;
@@ -645,14 +645,24 @@ class WC_Product_Sync_Send_Receive {
         $compress = $compress_manual !== null ? $compress_manual : (isset($options['auto_compress_images']) ? (bool)$options['auto_compress_images'] : true);
         $shop_b_url = isset($options['shop_b_url']) ? trailingslashit($options['shop_b_url']) : '';
         $receiver_api_key = isset($options['shop_b_receiver_api_key']) ? $options['shop_b_receiver_api_key'] : '';
-        $log = array();
+        
+        $st0 = get_transient('wc_product_sync_progress_' . $job);
+        $log_string = isset($st0['log']) ? $st0['log'] : '';
+        $log = $log_string ? explode("\n", $log_string) : array();
+        
+        $processed = ($st0 && isset($st0['processed'])) ? intval($st0['processed']) : 0;
+        $total_initial = ($st0 && isset($st0['total'])) ? intval($st0['total']) : 0;
+        
+        $log[] = 'Background worker awakened. Preparing to sync...';
+        $this->update_progress($job, $total_initial, $processed, $log);
+        
         $allow_all = $this->receiver_supports_status($shop_b_url, $receiver_api_key);
         $total = $this->count_products($limit, $allow_all);
-        $st0 = get_transient('wc_product_sync_progress_' . $job);
+        
         $processed = ($st0 && isset($st0['processed'])) ? intval($st0['processed']) : 0;
         $started_at = ($st0 && isset($st0['started_at'])) ? intval($st0['started_at']) : time();
         $user_id = ($st0 && isset($st0['user_id'])) ? $st0['user_id'] : 0;
-        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => $processed, 'log' => isset($st0['log']) ? $st0['log'] : '', 'user_id' => $user_id, 'started_at' => $started_at, 'eta_seconds' => isset($st0['eta_seconds']) ? $st0['eta_seconds'] : 0), 12 * HOUR_IN_SECONDS);
+        set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => $user_id, 'started_at' => $started_at, 'eta_seconds' => isset($st0['eta_seconds']) ? $st0['eta_seconds'] : 0), 12 * HOUR_IN_SECONDS);
         $remaining = max(0, $total - $processed);
         if ($remaining === 0) {
             $st = get_transient('wc_product_sync_progress_' . $job);
@@ -662,6 +672,10 @@ class WC_Product_Sync_Send_Receive {
             return;
         }
         $page = min($batch_size, $remaining);
+        
+        $log[] = 'Fetching next chunk of ' . $page . ' products to process...';
+        $this->update_progress($job, $total, $processed, $log);
+        
         $args = array('post_type' => 'product', 'orderby' => 'ID', 'order' => 'ASC');
         if ($allow_all) { $args['post_status'] = array('publish','draft','pending','private'); } else { $args['post_status'] = 'publish'; }
         $args['posts_per_page'] = $page;
