@@ -705,6 +705,12 @@ class WC_Product_Sync_Send_Receive {
 
     private function update_progress($job, $total, $processed, $log) {
         $st = get_transient('wc_product_sync_progress_' . $job);
+        
+        // If the job has already been cancelled by the user during this processing step, do not overwrite it back to running.
+        if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
+            return;
+        }
+
         $uid = isset($st['user_id']) ? $st['user_id'] : 0;
         $started = isset($st['started_at']) ? intval($st['started_at']) : time();
         $eta = 0;
