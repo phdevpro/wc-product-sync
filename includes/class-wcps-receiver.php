@@ -52,13 +52,30 @@ class WCPS_Receiver {
         if (!empty($sku) && function_exists('wc_get_product_id_by_sku')) {
             $product_id = wc_get_product_id_by_sku($sku);
         }
+
+        // Fallback: se lo SKU è vuoto o il prodotto non è stato trovato tramite SKU,
+        // cerchiamo per nome/titolo in modo da evitare la duplicazione.
+        if (!$product_id && !empty($name)) {
+            global $wpdb;
+            $found_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT ID FROM {$wpdb->posts} WHERE post_title = %s AND post_type = 'product' AND post_status != 'trash' LIMIT 1",
+                $name
+            ));
+            if ($found_id) {
+                $product_id = $found_id;
+            }
+        }
+
         $product = $product_id ? wc_get_product($product_id) : null;
         if (!$product) {
             $product = new WC_Product_Simple();
-            if (!empty($sku)) {
-                $product->set_sku($sku);
-            }
         }
+
+        // Assicuriamoci di aggiornare sempre lo SKU, anche sui prodotti pre-esistenti
+        if (isset($data['sku'])) {
+            $product->set_sku($sku);
+        }
+
         if ($name !== '') {
             $product->set_name($name);
         }
