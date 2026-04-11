@@ -710,6 +710,28 @@ class WC_Product_Sync_Send_Receive {
                 'status' => method_exists($product, 'get_status') ? $product->get_status() : 'publish',
                 'modified' => $mod_date ? $mod_date->getTimestamp() : 0,
             );
+
+            // Eseguiamo il pre-flight check per vedere se B ha già un prodotto aggiornato.
+            // Se sì saltiamo tutta la logica delle immagini risparmiando enormi risorse in A e rete verso B!
+            $check_endpoint = $shop_b_url . 'wp-json/product-sync/v1/check-modified';
+            $check_payload = array('sku' => $payload['sku'], 'name' => $payload['name'], 'modified' => $payload['modified']);
+            $check_resp = wp_remote_post($check_endpoint, array('headers' => array('Content-Type' => 'application/json', 'X-Product-Sync-Key' => $receiver_api_key), 'body' => json_encode($check_payload), 'timeout' => 15));
+            
+            if (!is_wp_error($check_resp)) {
+                $check_code = wp_remote_retrieve_response_code($check_resp);
+                if ($check_code >= 200 && $check_code < 300) {
+                    $check_body = wp_remote_retrieve_body($check_resp);
+                    $check_decoded = json_decode($check_body, true);
+                    if (is_array($check_decoded) && isset($check_decoded['needs_update']) && !$check_decoded['needs_update']) {
+                        $dbg = isset($check_decoded['debug_dates']) ? ' ' . $check_decoded['debug_dates'] : '';
+                        $log[] = 'Skipped ' . $product->get_name() . ' (Up to date)' . $dbg;
+                        $processed++;
+                        $this->update_progress($job, $total, $processed, $log);
+                        continue;
+                    }
+                }
+            }
+
             if (!$skip) {
                 $images = array();
                 $image_ids_to_process = array();

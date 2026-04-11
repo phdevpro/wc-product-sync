@@ -11,6 +11,11 @@ class WCPS_Receiver {
             'callback' => array('WCPS_Receiver', 'handle_config'),
             'permission_callback' => array('WCPS_Receiver', 'permission_check')
         ));
+        register_rest_route('product-sync/v1', '/check-modified', array(
+            'methods' => 'POST',
+            'callback' => array('WCPS_Receiver', 'handle_check_modified'),
+            'permission_callback' => array('WCPS_Receiver', 'permission_check')
+        ));
     }
 
     public static function permission_check($request) {
@@ -159,6 +164,56 @@ class WCPS_Receiver {
         $options = get_option('wc_product_sync_sender_settings');
         $sync_status = isset($options['receiver_sync_status']) && $options['receiver_sync_status'];
         return rest_ensure_response(array('sync_status' => (bool)$sync_status));
+    }
+
+    public static function handle_check_modified($request) {
+        $data = is_object($request) && method_exists($request, 'get_json_params') ? $request->get_json_params() : null;
+        if (!is_array($data)) {
+            return new WP_Error('invalid_payload', 'Invalid payload', array('status' => 400));
+        }
+
+        $sku = isset($data['sku']) ? $data['sku'] : '';
+        $name = isset($data['name']) ? $data['name'] : '';
+        $modified_a = isset($data['modified']) ? intval($data['modified']) : 0;
+
+        if (empty($sku) && empty($name)) {
+            return rest_ensure_response(array('needs_update' => true));
+        }
+
+        $product_id = 0;
+        if (!empty($sku) && function_exists('wc_get_product_id_by_sku')) {
+            $product_id = wc_get_product_id_by_sku($sku);
+        }
+
+        if (!$product_id && !empty($name)) {
+            global $wpdb;
+            $found_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT ID FROM {$wpdb->posts} WHERE post_title = %s AND post_type = 'product' AND post_status != 'trash' LIMIT 1",
+                $name
+            ));
+            if ($found_id) {
+                $product_id = $found_id;
+            }
+        }
+
+        if (!$product_id) {
+            return rest_ensure_response(array('needs_update' => true));
+        }
+
+        $product = wc_get_product($product_id);
+        if ($product && $modified_a > 0) {
+            $mod_date_b = method_exists($product, 'get_date_modified') ? $product->get_date_modified() : null;
+            $modified_b = $mod_date_b ? $mod_date_b->getTimestamp() : 0;
+            
+            if ($modified_b >= $modified_a) {
+                return rest_ensure_response(array(
+                    'needs_update' => false,
+                    'debug_dates' => "[Mod A: {$modified_a}, Mod B: {$modified_b}]"
+                ));
+            }
+        }
+
+        return rest_ensure_response(array('needs_update' => true));
     }
 
     private static function import_images($images) {
