@@ -699,6 +699,7 @@ class WC_Product_Sync_Send_Receive {
                 if (is_numeric($rp)) { $rp_out = number_format(floatval($rp) * (1 + ($markup/100)), 2, '.', ''); }
                 if ($sp !== '' && is_numeric($sp)) { $sp_out = number_format(floatval($sp) * (1 + ($markup/100)), 2, '.', ''); }
             }
+            $mod_date = method_exists($product, 'get_date_modified') ? $product->get_date_modified() : null;
             $payload = array(
                 'name' => $product->get_name(),
                 'sku' => $product->get_sku(),
@@ -707,6 +708,7 @@ class WC_Product_Sync_Send_Receive {
                 'description' => $product->get_description(),
                 'short_description' => $product->get_short_description(),
                 'status' => method_exists($product, 'get_status') ? $product->get_status() : 'publish',
+                'modified' => $mod_date ? $mod_date->getTimestamp() : 0,
             );
             if (!$skip) {
                 $images = array();
@@ -811,7 +813,12 @@ class WC_Product_Sync_Send_Receive {
                     $decoded = json_decode($body, true);
                     if (is_array($decoded) && isset($decoded['success']) && $decoded['success']) {
                         $pid = isset($decoded['product_id']) ? $decoded['product_id'] : '?';
-                        $log[] = 'Upserted ' . $product->get_name() . ' (ID ' . $pid . ')';
+                        $dbg = isset($decoded['debug_dates']) ? ' ' . $decoded['debug_dates'] : '';
+                        if (isset($decoded['skipped']) && $decoded['skipped']) {
+                            $log[] = 'Skipped ' . $product->get_name() . ' (Up to date)' . $dbg;
+                        } else {
+                            $log[] = 'Upserted ' . $product->get_name() . ' (ID ' . $pid . ')' . $dbg;
+                        }
                     } else {
                         $log[] = 'Receiver error: ' . $body;
                     }

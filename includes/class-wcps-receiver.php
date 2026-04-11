@@ -68,10 +68,12 @@ class WCPS_Receiver {
 
         $modified_a = isset($data['modified']) ? intval($data['modified']) : 0;
         $product = $product_id ? wc_get_product($product_id) : null;
+        $debug_dates = '';
 
         if ($product && $modified_a > 0) {
             $mod_date_b = method_exists($product, 'get_date_modified') ? $product->get_date_modified() : null;
             $modified_b = $mod_date_b ? $mod_date_b->getTimestamp() : 0;
+            $debug_dates = "[Mod A: {$modified_a}, Mod B: {$modified_b}]";
             
             // Se la data di modifica su B è più recente o uguale a quella di A, saltiamo l'aggiornamento
             if ($modified_b >= $modified_a) {
@@ -79,7 +81,8 @@ class WCPS_Receiver {
                     'success' => true, 
                     'product_id' => $product->get_id(), 
                     'skipped' => true, 
-                    'reason' => 'up_to_date'
+                    'reason' => 'up_to_date',
+                    'debug_dates' => $debug_dates
                 ));
             }
         }
@@ -149,7 +152,7 @@ class WCPS_Receiver {
             }
         }
         $product->save();
-        return rest_ensure_response(array('success' => true, 'product_id' => $product->get_id()));
+        return rest_ensure_response(array('success' => true, 'product_id' => $product->get_id(), 'debug_dates' => isset($debug_dates) ? $debug_dates : ''));
     }
 
     public static function handle_config($request) {
