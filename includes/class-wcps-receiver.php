@@ -66,7 +66,23 @@ class WCPS_Receiver {
             }
         }
 
+        $modified_a = isset($data['modified']) ? intval($data['modified']) : 0;
         $product = $product_id ? wc_get_product($product_id) : null;
+
+        if ($product && $modified_a > 0) {
+            $mod_date_b = method_exists($product, 'get_date_modified') ? $product->get_date_modified() : null;
+            $modified_b = $mod_date_b ? $mod_date_b->getTimestamp() : 0;
+            
+            // Se la data di modifica su B è più recente o uguale a quella di A, saltiamo l'aggiornamento
+            if ($modified_b >= $modified_a) {
+                return rest_ensure_response(array(
+                    'success' => true, 
+                    'product_id' => $product->get_id(), 
+                    'skipped' => true, 
+                    'reason' => 'up_to_date'
+                ));
+            }
+        }
         if (!$product) {
             $product = new WC_Product_Simple();
         }
