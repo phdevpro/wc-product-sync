@@ -75,6 +75,21 @@ class WCPS_Receiver {
         $product = $product_id ? wc_get_product($product_id) : null;
         $debug_dates = '';
 
+        // Aggiornamento di soli prezzi: A ha già verificato che il resto è allineato,
+        // quindi forziamo la scrittura dei prezzi senza toccare contenuti e immagini.
+        if ($product && !empty($data['price_only'])) {
+            $reg_b_before = (string)$product->get_regular_price();
+            if ($regular !== '') { $product->set_regular_price($regular); }
+            $product->set_sale_price($sale);
+            $product->save();
+            return rest_ensure_response(array(
+                'success' => true,
+                'product_id' => $product->get_id(),
+                'price_only' => true,
+                'debug_dates' => "[Reg A: {$regular}, Reg B was: {$reg_b_before}]"
+            ));
+        }
+
         if ($product && $modified_a > 0) {
             $mod_date_b = method_exists($product, 'get_date_modified') ? $product->get_date_modified() : null;
             $modified_b = $mod_date_b ? $mod_date_b->getTimestamp() : 0;
@@ -219,10 +234,22 @@ class WCPS_Receiver {
                 && self::price_equals($sale_a, $product->get_sale_price());
 
             $reg_a_dbg = $regular_a === null ? 'null' : $regular_a;
+            $debug_dates = "[Mod A: {$modified_a}, Mod B: {$modified_b}] [Reg A: {$reg_a_dbg}, Reg B: {$reg_b_dbg}]";
+
             if ($modified_b >= $modified_a && $price_matches) {
                 return rest_ensure_response(array(
                     'needs_update' => false,
-                    'debug_dates' => "[Mod A: {$modified_a}, Mod B: {$modified_b}] [Reg A: {$reg_a_dbg}, Reg B: {$reg_b_dbg}]"
+                    'debug_dates' => $debug_dates
+                ));
+            }
+
+            // Il contenuto su B è già aggiornato: solo i prezzi sono cambiati (es. markup).
+            // Segnaliamo ad A che può inviare un payload leggero, senza immagini.
+            if ($modified_b >= $modified_a) {
+                return rest_ensure_response(array(
+                    'needs_update' => true,
+                    'price_only' => true,
+                    'debug_dates' => $debug_dates
                 ));
             }
         }

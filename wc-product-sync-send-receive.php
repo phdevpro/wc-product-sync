@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.16
+Version: 2.2.17
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -732,7 +732,10 @@ class WC_Product_Sync_Send_Receive {
             $check_endpoint = $shop_b_url . 'wp-json/product-sync/v1/check-modified';
             $check_payload = array('sku' => $payload['sku'], 'name' => $payload['name'], 'modified' => $payload['modified'], 'regular_price' => $payload['regular_price'], 'sale_price' => $payload['sale_price']);
             $check_resp = wp_remote_post($check_endpoint, array('headers' => array('Content-Type' => 'application/json', 'X-Product-Sync-Key' => $receiver_api_key), 'body' => json_encode($check_payload), 'timeout' => 15));
-            
+
+            // B può dirci che è cambiato solo il prezzo: in quel caso inviamo un payload
+            // leggero, senza immagini né contenuti, e B forza la scrittura dei prezzi.
+            $price_only = false;
             if (!is_wp_error($check_resp)) {
                 $check_code = wp_remote_retrieve_response_code($check_resp);
                 if ($check_code >= 200 && $check_code < 300) {
@@ -745,10 +748,21 @@ class WC_Product_Sync_Send_Receive {
                         $this->update_progress($job, $total, $processed, $log);
                         continue;
                     }
+                    $price_only = is_array($check_decoded) && !empty($check_decoded['price_only']);
                 }
             }
 
-            if (!$skip) {
+            if ($price_only) {
+                $payload = array(
+                    'name' => $payload['name'],
+                    'sku' => $payload['sku'],
+                    'regular_price' => $payload['regular_price'],
+                    'sale_price' => $payload['sale_price'],
+                    'price_only' => true,
+                );
+            }
+
+            if (!$skip && !$price_only) {
                 $images = array();
                 $image_ids_to_process = array();
                 
@@ -854,6 +868,8 @@ class WC_Product_Sync_Send_Receive {
                         $dbg = isset($decoded['debug_dates']) ? ' ' . $decoded['debug_dates'] : '';
                         if (isset($decoded['skipped']) && $decoded['skipped']) {
                             $log[] = 'Skipped ' . $product->get_name() . ' (Up to date)' . $dbg;
+                        } elseif (!empty($decoded['price_only'])) {
+                            $log[] = 'Prices updated ' . $product->get_name() . ' (ID ' . $pid . ')' . $dbg;
                         } else {
                             $log[] = 'Upserted ' . $product->get_name() . ' (ID ' . $pid . ')' . $dbg;
                         }
