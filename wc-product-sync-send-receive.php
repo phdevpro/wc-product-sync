@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.12
+Version: 2.2.13
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -714,7 +714,7 @@ class WC_Product_Sync_Send_Receive {
             // Eseguiamo il pre-flight check per vedere se B ha già un prodotto aggiornato.
             // Se sì saltiamo tutta la logica delle immagini risparmiando enormi risorse in A e rete verso B!
             $check_endpoint = $shop_b_url . 'wp-json/product-sync/v1/check-modified';
-            $check_payload = array('sku' => $payload['sku'], 'name' => $payload['name'], 'modified' => $payload['modified']);
+            $check_payload = array('sku' => $payload['sku'], 'name' => $payload['name'], 'modified' => $payload['modified'], 'regular_price' => $payload['regular_price'], 'sale_price' => $payload['sale_price']);
             $check_resp = wp_remote_post($check_endpoint, array('headers' => array('Content-Type' => 'application/json', 'X-Product-Sync-Key' => $receiver_api_key), 'body' => json_encode($check_payload), 'timeout' => 15));
             
             if (!is_wp_error($check_resp)) {

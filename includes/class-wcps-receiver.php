@@ -175,6 +175,8 @@ class WCPS_Receiver {
         $sku = isset($data['sku']) ? $data['sku'] : '';
         $name = isset($data['name']) ? $data['name'] : '';
         $modified_a = isset($data['modified']) ? intval($data['modified']) : 0;
+        $regular_a = isset($data['regular_price']) ? (string)$data['regular_price'] : null;
+        $sale_a = isset($data['sale_price']) ? (string)$data['sale_price'] : null;
 
         if (empty($sku) && empty($name)) {
             return rest_ensure_response(array('needs_update' => true));
@@ -205,7 +207,25 @@ class WCPS_Receiver {
             $mod_date_b = method_exists($product, 'get_date_modified') ? $product->get_date_modified() : null;
             $modified_b = $mod_date_b ? $mod_date_b->getTimestamp() : 0;
             
-            if ($modified_b >= $modified_a) {
+            $price_matches = true;
+            if ($regular_a !== null) {
+                $regular_b = (string)$product->get_regular_price();
+                if (is_numeric($regular_a) && is_numeric($regular_b)) {
+                    if (abs(floatval($regular_a) - floatval($regular_b)) > 0.001) { $price_matches = false; }
+                } elseif ($regular_a !== $regular_b) {
+                    $price_matches = false;
+                }
+            }
+            if ($price_matches && $sale_a !== null) {
+                $sale_b = (string)$product->get_sale_price();
+                if (is_numeric($sale_a) && is_numeric($sale_b)) {
+                    if (abs(floatval($sale_a) - floatval($sale_b)) > 0.001) { $price_matches = false; }
+                } elseif ($sale_a !== $sale_b) {
+                    $price_matches = false;
+                }
+            }
+
+            if ($modified_b >= $modified_a && $price_matches) {
                 return rest_ensure_response(array(
                     'needs_update' => false,
                     'debug_dates' => "[Mod A: {$modified_a}, Mod B: {$modified_b}]"
