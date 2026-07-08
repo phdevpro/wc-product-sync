@@ -225,10 +225,12 @@ class WCPS_Receiver {
                 }
             }
 
+            $reg_b_dbg = (string)$product->get_regular_price();
+            $reg_a_dbg = $regular_a === null ? 'null' : $regular_a;
             if ($modified_b >= $modified_a && $price_matches) {
                 return rest_ensure_response(array(
                     'needs_update' => false,
-                    'debug_dates' => "[Mod A: {$modified_a}, Mod B: {$modified_b}]"
+                    'debug_dates' => "[Mod A: {$modified_a}, Mod B: {$modified_b}] [Reg A: {$reg_a_dbg}, Reg B: {$reg_b_dbg}]"
                 ));
             }
         }
