@@ -77,7 +77,18 @@ class WCPS_Receiver {
 
         // Aggiornamento di soli prezzi: A ha già verificato che il resto è allineato,
         // quindi forziamo la scrittura dei prezzi senza toccare contenuti e immagini.
-        if ($product && !empty($data['price_only'])) {
+        // Il payload è privo di contenuti e immagini, quindi non possiamo creare
+        // un prodotto nuovo: se non esiste su B, va sincronizzato per intero.
+        if (!empty($data['price_only'])) {
+            if (!$product) {
+                return rest_ensure_response(array(
+                    'success' => true,
+                    'product_id' => 0,
+                    'skipped' => true,
+                    'reason' => 'not_found',
+                    'debug_dates' => '[price-only: product not on B]'
+                ));
+            }
             $reg_b_before = (string)$product->get_regular_price();
             if ($regular !== '') { $product->set_regular_price($regular); }
             $product->set_sale_price($sale);

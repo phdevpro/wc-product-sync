@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.17
+Version: 2.2.18
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -30,7 +30,7 @@ class WC_Product_Sync_Send_Receive {
         add_action('wp_ajax_wc_product_sync_test_receiver', array($this, 'ajax_test_receiver'));
         add_action('wp_ajax_wc_product_sync_resume', array($this, 'ajax_resume'));
         add_action('wp_ajax_wc_product_sync_purge_receiver', array($this, 'ajax_purge_receiver'));
-        add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 7);
+        add_action('wc_product_sync_run_event', array($this, 'run_sync_event'), 10, 8);
         add_filter('cron_schedules', array($this, 'add_cron_schedules'));
         add_action('init', array($this, 'ensure_scheduler'));
         add_action('wc_product_sync_scheduler_tick', array($this, 'scheduler_tick'));
@@ -278,6 +278,12 @@ class WC_Product_Sync_Send_Receive {
                 </p>
                 <p>
                     <label>
+                        <input type="checkbox" name="price_sync_only" value="1" />
+                        Sync Prices Only (force prices on every product, ignore modified date, no images or content)
+                    </label>
+                </p>
+                <p>
+                    <label>
                         <?php $comp = isset($options['auto_compress_images']) ? (bool)$options['auto_compress_images'] : true; ?>
                         <input type="checkbox" name="compress_images_sync" value="1" <?php echo $comp?'checked':''; ?> />
                         Compress Images (Send Large)
@@ -362,6 +368,7 @@ class WC_Product_Sync_Send_Receive {
                 var dry=f.querySelector('[name="dry_run"]');
                 var lim=f.querySelector('[name="product_limit"]');
                 var skip=f.querySelector('[name="skip_image_sync"]');
+                var priceOnly=f.querySelector('[name="price_sync_only"]');
                 var comp=f.querySelector('[name="compress_images_sync"]');
                 var gl=f.querySelector('[name="gallery_limit"]');
                 var data=new FormData();
@@ -370,6 +377,7 @@ class WC_Product_Sync_Send_Receive {
                 data.append('dry_run',dry && dry.checked ? '1':'0');
                 data.append('product_limit',lim && lim.value ? lim.value : '0');
                 data.append('skip_image_sync',skip && skip.checked ? '1':'0');
+                data.append('price_sync_only',priceOnly && priceOnly.checked ? '1':'0');
                 data.append('compress_images_sync',comp && comp.checked ? '1':'0');
                 data.append('gallery_limit',gl && gl.value ? gl.value : '0');
                 var logEl=document.getElementById('wcps-log'); if(logEl){logEl.value=''}
@@ -487,6 +495,7 @@ class WC_Product_Sync_Send_Receive {
         $dry = isset($_POST['dry_run']) && $_POST['dry_run'] == '1';
         $limit = isset($_POST['product_limit']) ? absint($_POST['product_limit']) : 0;
         $skip = isset($_POST['skip_image_sync']) && $_POST['skip_image_sync'] == '1';
+        $price_only_mode = isset($_POST['price_sync_only']) && $_POST['price_sync_only'] == '1';
         $compress = isset($_POST['compress_images_sync']) && $_POST['compress_images_sync'] == '1';
         $job = uniqid('sync_', true);
         $total = $this->count_products($limit);
@@ -495,8 +504,8 @@ class WC_Product_Sync_Send_Receive {
         $gallery_limit = isset($_POST['gallery_limit']) ? absint($_POST['gallery_limit']) : 0;
         $batch_size = 20;
         // Persist job params so the browser poll can drive batches inline even when wp-cron/loopback is dead.
-        set_transient('wc_product_sync_params_' . $job, array('dry' => $dry, 'limit' => $limit, 'skip' => $skip, 'gallery_limit' => $gallery_limit, 'batch_size' => $batch_size, 'compress' => $compress), 12 * HOUR_IN_SECONDS);
-        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, $compress));
+        set_transient('wc_product_sync_params_' . $job, array('dry' => $dry, 'limit' => $limit, 'skip' => $skip, 'gallery_limit' => $gallery_limit, 'batch_size' => $batch_size, 'compress' => $compress, 'price_only_mode' => $price_only_mode), 12 * HOUR_IN_SECONDS);
+        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, $compress, $price_only_mode));
         wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         wp_send_json_success(array('job_id' => $job));
     }
@@ -517,7 +526,7 @@ class WC_Product_Sync_Send_Receive {
         if ($st && isset($st['status']) && ($st['status'] === 'scheduled' || $st['status'] === 'running')) {
             $params = get_transient('wc_product_sync_params_' . $job);
             if (is_array($params)) {
-                $this->run_sync_event($job, $params['dry'], $params['limit'], $params['skip'], $params['gallery_limit'], $params['batch_size'], $params['compress']);
+                $this->run_sync_event($job, $params['dry'], $params['limit'], $params['skip'], $params['gallery_limit'], $params['batch_size'], $params['compress'], !empty($params['price_only_mode']));
                 $st = get_transient('wc_product_sync_progress_' . $job);
             }
         }
@@ -650,7 +659,7 @@ class WC_Product_Sync_Send_Receive {
         wp_send_json_error(array('message' => 'HTTP ' . $code . ': ' . $body));
     }
 
-    public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0, $batch_size = 20, $compress_manual = null) {
+    public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0, $batch_size = 20, $compress_manual = null, $price_only_mode = false) {
         // Prevent overlapping runs: cron-triggered and poll-triggered invocations of the same job must not run concurrently.
         $lock_key = 'wc_product_sync_lock_' . $job;
         if (get_transient($lock_key)) { return; }
@@ -727,28 +736,33 @@ class WC_Product_Sync_Send_Receive {
                 'modified' => $mod_date ? $mod_date->getTimestamp() : 0,
             );
 
-            // Eseguiamo il pre-flight check per vedere se B ha già un prodotto aggiornato.
-            // Se sì saltiamo tutta la logica delle immagini risparmiando enormi risorse in A e rete verso B!
-            $check_endpoint = $shop_b_url . 'wp-json/product-sync/v1/check-modified';
-            $check_payload = array('sku' => $payload['sku'], 'name' => $payload['name'], 'modified' => $payload['modified'], 'regular_price' => $payload['regular_price'], 'sale_price' => $payload['sale_price']);
-            $check_resp = wp_remote_post($check_endpoint, array('headers' => array('Content-Type' => 'application/json', 'X-Product-Sync-Key' => $receiver_api_key), 'body' => json_encode($check_payload), 'timeout' => 15));
+            // In modalità "Sync Prices Only" saltiamo il pre-flight: forziamo i prezzi
+            // su ogni prodotto ignorando la data di modifica.
+            $price_only = $price_only_mode;
 
-            // B può dirci che è cambiato solo il prezzo: in quel caso inviamo un payload
-            // leggero, senza immagini né contenuti, e B forza la scrittura dei prezzi.
-            $price_only = false;
-            if (!is_wp_error($check_resp)) {
-                $check_code = wp_remote_retrieve_response_code($check_resp);
-                if ($check_code >= 200 && $check_code < 300) {
-                    $check_body = wp_remote_retrieve_body($check_resp);
-                    $check_decoded = json_decode($check_body, true);
-                    if (is_array($check_decoded) && isset($check_decoded['needs_update']) && !$check_decoded['needs_update']) {
-                        $dbg = isset($check_decoded['debug_dates']) ? ' ' . $check_decoded['debug_dates'] : '';
-                        $log[] = 'Skipped ' . $product->get_name() . ' (Up to date)' . $dbg;
-                        $processed++;
-                        $this->update_progress($job, $total, $processed, $log);
-                        continue;
+            if (!$price_only_mode) {
+                // Eseguiamo il pre-flight check per vedere se B ha già un prodotto aggiornato.
+                // Se sì saltiamo tutta la logica delle immagini risparmiando enormi risorse in A e rete verso B!
+                $check_endpoint = $shop_b_url . 'wp-json/product-sync/v1/check-modified';
+                $check_payload = array('sku' => $payload['sku'], 'name' => $payload['name'], 'modified' => $payload['modified'], 'regular_price' => $payload['regular_price'], 'sale_price' => $payload['sale_price']);
+                $check_resp = wp_remote_post($check_endpoint, array('headers' => array('Content-Type' => 'application/json', 'X-Product-Sync-Key' => $receiver_api_key), 'body' => json_encode($check_payload), 'timeout' => 15));
+
+                // B può dirci che è cambiato solo il prezzo: in quel caso inviamo un payload
+                // leggero, senza immagini né contenuti, e B forza la scrittura dei prezzi.
+                if (!is_wp_error($check_resp)) {
+                    $check_code = wp_remote_retrieve_response_code($check_resp);
+                    if ($check_code >= 200 && $check_code < 300) {
+                        $check_body = wp_remote_retrieve_body($check_resp);
+                        $check_decoded = json_decode($check_body, true);
+                        if (is_array($check_decoded) && isset($check_decoded['needs_update']) && !$check_decoded['needs_update']) {
+                            $dbg = isset($check_decoded['debug_dates']) ? ' ' . $check_decoded['debug_dates'] : '';
+                            $log[] = 'Skipped ' . $product->get_name() . ' (Up to date)' . $dbg;
+                            $processed++;
+                            $this->update_progress($job, $total, $processed, $log);
+                            continue;
+                        }
+                        $price_only = is_array($check_decoded) && !empty($check_decoded['price_only']);
                     }
-                    $price_only = is_array($check_decoded) && !empty($check_decoded['price_only']);
                 }
             }
 
@@ -867,7 +881,8 @@ class WC_Product_Sync_Send_Receive {
                         $pid = isset($decoded['product_id']) ? $decoded['product_id'] : '?';
                         $dbg = isset($decoded['debug_dates']) ? ' ' . $decoded['debug_dates'] : '';
                         if (isset($decoded['skipped']) && $decoded['skipped']) {
-                            $log[] = 'Skipped ' . $product->get_name() . ' (Up to date)' . $dbg;
+                            $reason = (isset($decoded['reason']) && $decoded['reason'] === 'not_found') ? 'Not on Shop B, run a full sync' : 'Up to date';
+                            $log[] = 'Skipped ' . $product->get_name() . ' (' . $reason . ')' . $dbg;
                         } elseif (!empty($decoded['price_only'])) {
                             $log[] = 'Prices updated ' . $product->get_name() . ' (ID ' . $pid . ')' . $dbg;
                         } else {
@@ -890,7 +905,7 @@ class WC_Product_Sync_Send_Receive {
                 if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
                 return;
             }
-            wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, $compress_manual));
+            wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, $compress_manual, $price_only_mode));
             wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         } else {
             $st = get_transient('wc_product_sync_progress_' . $job);
@@ -1004,7 +1019,7 @@ class WC_Product_Sync_Send_Receive {
         update_option('wc_product_sync_auto_job', $job);
         update_option('wc_product_sync_last_run_min', $minute_key);
         $batch_size = 20;
-        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, null));
+        wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, null, false));
     }
 
     private function cron_matches($ts, $expr) {
