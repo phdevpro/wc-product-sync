@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.13
+Version: 2.2.14
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -494,6 +494,8 @@ class WC_Product_Sync_Send_Receive {
         update_user_meta(get_current_user_id(), 'wc_product_sync_current_job', $job);
         $gallery_limit = isset($_POST['gallery_limit']) ? absint($_POST['gallery_limit']) : 0;
         $batch_size = 20;
+        // Persist job params so the browser poll can drive batches inline even when wp-cron/loopback is dead.
+        set_transient('wc_product_sync_params_' . $job, array('dry' => $dry, 'limit' => $limit, 'skip' => $skip, 'gallery_limit' => $gallery_limit, 'batch_size' => $batch_size, 'compress' => $compress), 12 * HOUR_IN_SECONDS);
         wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, $compress));
         wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         wp_send_json_success(array('job_id' => $job));
@@ -510,6 +512,15 @@ class WC_Product_Sync_Send_Receive {
         }
         $st = get_transient('wc_product_sync_progress_' . $job);
         wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
+        // Drive one batch inline so the job progresses even if wp-cron never fires (loopback blocked / DISABLE_WP_CRON).
+        // run_sync_event holds a per-job lock, so this is safe alongside any cron-triggered run.
+        if ($st && isset($st['status']) && ($st['status'] === 'scheduled' || $st['status'] === 'running')) {
+            $params = get_transient('wc_product_sync_params_' . $job);
+            if (is_array($params)) {
+                $this->run_sync_event($job, $params['dry'], $params['limit'], $params['skip'], $params['gallery_limit'], $params['batch_size'], $params['compress']);
+                $st = get_transient('wc_product_sync_progress_' . $job);
+            }
+        }
         if (!$st) {
             wp_send_json_success(array('status' => 'unknown', 'total' => 0, 'processed' => 0, 'log' => ''));
         }
@@ -640,6 +651,11 @@ class WC_Product_Sync_Send_Receive {
     }
 
     public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0, $batch_size = 20, $compress_manual = null) {
+        // Prevent overlapping runs: cron-triggered and poll-triggered invocations of the same job must not run concurrently.
+        $lock_key = 'wc_product_sync_lock_' . $job;
+        if (get_transient($lock_key)) { return; }
+        set_transient($lock_key, 1, 3 * MINUTE_IN_SECONDS);
+        if (function_exists('set_time_limit')) { @set_time_limit(0); }
         try {
             $options = get_option('wc_product_sync_sender_settings');
         $compress = $compress_manual !== null ? $compress_manual : (isset($options['auto_compress_images']) ? (bool)$options['auto_compress_images'] : true);
@@ -876,6 +892,8 @@ class WC_Product_Sync_Send_Receive {
             
             // Mark job as failed so UI doesn't hang forever
             set_transient('wc_product_sync_progress_' . $job, array('status' => 'cancelled', 'total' => 0, 'processed' => 0, 'log' => $err_msg, 'user_id' => 0, 'started_at' => time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
+        } finally {
+            delete_transient($lock_key);
         }
     }
 
