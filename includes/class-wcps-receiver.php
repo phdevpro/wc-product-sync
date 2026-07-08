@@ -78,10 +78,17 @@ class WCPS_Receiver {
         if ($product && $modified_a > 0) {
             $mod_date_b = method_exists($product, 'get_date_modified') ? $product->get_date_modified() : null;
             $modified_b = $mod_date_b ? $mod_date_b->getTimestamp() : 0;
-            $debug_dates = "[Mod A: {$modified_a}, Mod B: {$modified_b}]";
-            
+
+            // I prezzi possono cambiare su A senza toccare la data di modifica (es. markup),
+            // quindi vanno confrontati prima di decidere che il prodotto è aggiornato.
+            $regular_b = (string)$product->get_regular_price();
+            $sale_b = (string)$product->get_sale_price();
+            $price_matches = self::price_equals($regular, $regular_b) && self::price_equals($sale, $sale_b);
+
+            $debug_dates = "[Mod A: {$modified_a}, Mod B: {$modified_b}] [Reg A: {$regular}, Reg B: {$regular_b}]";
+
             // Se la data di modifica su B è più recente o uguale a quella di A, saltiamo l'aggiornamento
-            if ($modified_b >= $modified_a) {
+            if ($modified_b >= $modified_a && $price_matches) {
                 return rest_ensure_response(array(
                     'success' => true, 
                     'product_id' => $product->get_id(), 
@@ -207,25 +214,10 @@ class WCPS_Receiver {
             $mod_date_b = method_exists($product, 'get_date_modified') ? $product->get_date_modified() : null;
             $modified_b = $mod_date_b ? $mod_date_b->getTimestamp() : 0;
             
-            $price_matches = true;
-            if ($regular_a !== null) {
-                $regular_b = (string)$product->get_regular_price();
-                if (is_numeric($regular_a) && is_numeric($regular_b)) {
-                    if (abs(floatval($regular_a) - floatval($regular_b)) > 0.001) { $price_matches = false; }
-                } elseif ($regular_a !== $regular_b) {
-                    $price_matches = false;
-                }
-            }
-            if ($price_matches && $sale_a !== null) {
-                $sale_b = (string)$product->get_sale_price();
-                if (is_numeric($sale_a) && is_numeric($sale_b)) {
-                    if (abs(floatval($sale_a) - floatval($sale_b)) > 0.001) { $price_matches = false; }
-                } elseif ($sale_a !== $sale_b) {
-                    $price_matches = false;
-                }
-            }
-
             $reg_b_dbg = (string)$product->get_regular_price();
+            $price_matches = self::price_equals($regular_a, $reg_b_dbg)
+                && self::price_equals($sale_a, $product->get_sale_price());
+
             $reg_a_dbg = $regular_a === null ? 'null' : $regular_a;
             if ($modified_b >= $modified_a && $price_matches) {
                 return rest_ensure_response(array(
@@ -236,6 +228,21 @@ class WCPS_Receiver {
         }
 
         return rest_ensure_response(array('needs_update' => true));
+    }
+
+    /**
+     * Confronta un prezzo inviato da A con quello presente su B.
+     * Un prezzo vuoto o assente su A significa "non toccare", quindi conta come uguale.
+     */
+    private static function price_equals($price_a, $price_b) {
+        if ($price_a === null || $price_a === '') {
+            return true;
+        }
+        $price_b = (string)$price_b;
+        if (is_numeric($price_a) && is_numeric($price_b)) {
+            return abs(floatval($price_a) - floatval($price_b)) <= 0.001;
+        }
+        return (string)$price_a === $price_b;
     }
 
     private static function import_images($images) {
