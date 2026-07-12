@@ -71,6 +71,14 @@ class WCPS_Receiver {
             }
         }
 
+        // wc_get_product_id_by_sku() ignora i prodotti nel cestino, ma la lookup table
+        // conserva comunque lo SKU: creare un nuovo prodotto solleverebbe l'eccezione
+        // "SKU already present in the lookup table". Recuperiamo quindi il prodotto
+        // cestinato (verra' ripubblicato piu' sotto) o ripuliamo la riga orfana.
+        if (!$product_id && $sku !== '') {
+            $product_id = self::find_product_id_by_sku_any_status($sku);
+        }
+
         $modified_a = isset($data['modified']) ? intval($data['modified']) : 0;
         $product = $product_id ? wc_get_product($product_id) : null;
         $debug_dates = '';
@@ -189,8 +197,46 @@ class WCPS_Receiver {
                 wp_delete_attachment($del_id, true);
             }
         }
-        $product->save();
+        try {
+            $product->save();
+        } catch (Exception $e) {
+            return new WP_Error(
+                'save_failed',
+                sprintf('Save failed for SKU "%s": %s', $sku, $e->getMessage()),
+                array('status' => 409)
+            );
+        }
         return rest_ensure_response(array('success' => true, 'product_id' => $product->get_id(), 'debug_dates' => isset($debug_dates) ? $debug_dates : ''));
+    }
+
+    /**
+     * Cerca un prodotto per SKU nella lookup table di WooCommerce, includendo
+     * gli stati che wc_get_product_id_by_sku() esclude (in primis 'trash').
+     * Se la riga della lookup punta a un post inesistente la rimuove, perche'
+     * bloccherebbe qualsiasi inserimento futuro con lo stesso SKU.
+     */
+    private static function find_product_id_by_sku_any_status($sku) {
+        global $wpdb;
+        if ($sku === '' || $sku === null) {
+            return 0;
+        }
+        $lookup = $wpdb->prefix . 'wc_product_meta_lookup';
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT lookup.product_id AS product_id, posts.post_status AS post_status
+             FROM {$lookup} AS lookup
+             LEFT JOIN {$wpdb->posts} AS posts ON posts.ID = lookup.product_id
+             WHERE lookup.sku = %s
+             LIMIT 1",
+            $sku
+        ));
+        if (!$row) {
+            return 0;
+        }
+        if (empty($row->post_status)) {
+            $wpdb->delete($lookup, array('product_id' => intval($row->product_id)), array('%d'));
+            return 0;
+        }
+        return intval($row->product_id);
     }
 
     public static function handle_config($request) {
