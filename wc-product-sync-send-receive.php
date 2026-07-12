@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.21
+Version: 2.2.22
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -26,6 +26,7 @@ class WC_Product_Sync_Send_Receive {
         add_action('rest_api_init', array('WCPS_Receiver', 'register_routes'));
         add_action('wp_ajax_wc_product_sync_start', array($this, 'ajax_start_sync'));
         add_action('wp_ajax_wc_product_sync_progress', array($this, 'ajax_progress'));
+        add_action('wp_ajax_wc_product_sync_tick', array($this, 'ajax_tick'));
         add_action('wp_ajax_wc_product_sync_cancel', array($this, 'ajax_cancel'));
         add_action('wp_ajax_wc_product_sync_test_receiver', array($this, 'ajax_test_receiver'));
         add_action('wp_ajax_wc_product_sync_resume', array($this, 'ajax_resume'));
@@ -319,7 +320,7 @@ class WC_Product_Sync_Send_Receive {
         </div>
         <script>
         (function(){
-            var job=null;var timer=null;var wpAjax=(typeof ajaxurl!=='undefined'?ajaxurl:'<?php echo admin_url('admin-ajax.php'); ?>');
+            var job=null;var timer=null;var driving=false;var wpAjax=(typeof ajaxurl!=='undefined'?ajaxurl:'<?php echo admin_url('admin-ajax.php'); ?>');
             
             var purgeBtn=document.getElementById('wcps-purge');
             if(purgeBtn){
@@ -382,7 +383,7 @@ class WC_Product_Sync_Send_Receive {
                 data.append('gallery_limit',gl && gl.value ? gl.value : '0');
                 var logEl=document.getElementById('wcps-log'); if(logEl){logEl.value=''}
                 fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
-                    if(res && res.success){job=res.data.job_id;document.getElementById('wcps-progress-status').textContent='Running';setStartEnabled(false);poll()} else {alert(res && res.data && res.data.message ? res.data.message : 'Error starting sync')}
+                    if(res && res.success){job=res.data.job_id;document.getElementById('wcps-progress-status').textContent='Running';setStartEnabled(false);startPolling()} else {alert(res && res.data && res.data.message ? res.data.message : 'Error starting sync')}
                 });
             }
             function cancelSync(){
@@ -414,6 +415,9 @@ class WC_Product_Sync_Send_Receive {
                     if(res && res.success){el.textContent='Receiver OK'} else {el.textContent=(res && res.data && res.data.message)?res.data.message:'Receiver test failed'}
                 }).catch(function(){document.getElementById('wcps-test-result').textContent='Receiver test failed'});
             }
+            // Il poll legge soltanto lo stato (risposta immediata): i batch girano nella
+            // richiesta separata di drive(), altrimenti il contatore resterebbe fermo per
+            // tutta la durata del batch pur essendo il sync in corso.
             function poll(){
                 if(!job){return}
                 var data=new FormData();
@@ -432,6 +436,27 @@ class WC_Product_Sync_Send_Receive {
                     timer=setTimeout(poll,2000);
                 });
             }
+            // Tiene sempre un batch in volo finche' il job e' vivo. Il lock lato server
+            // impedisce sovrapposizioni con il cron.
+            function drive(){
+                if(!job || driving){return}
+                driving=true;
+                var current=job;
+                var data=new FormData();
+                data.append('action','wc_product_sync_tick');
+                data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
+                data.append('job_id',current);
+                fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
+                    driving=false;
+                    var st=(res && res.success && res.data)?res.data.status:'';
+                    if(st==='done'||st==='error'||st==='cancelled'){return}
+                    if(job===current){drive()}
+                }).catch(function(){
+                    driving=false;
+                    if(job===current){setTimeout(drive,5000)}
+                });
+            }
+            function startPolling(){poll();drive()}
             function resume(){
                 var data=new FormData();
                 data.append('action','wc_product_sync_resume');
@@ -445,7 +470,7 @@ class WC_Product_Sync_Send_Receive {
                         document.getElementById('wcps-progress-count').textContent=d.processed+' / '+d.total + (etaMsg?(' — '+etaMsg):'');
                         if(d.log){document.getElementById('wcps-log').value=d.log}
                         document.getElementById('wcps-progress-status').textContent=d.status;
-                        if(d.status==='running'||d.status==='scheduled'){setStartEnabled(false);poll()} else {setStartEnabled(true)}
+                        if(d.status==='running'||d.status==='scheduled'){setStartEnabled(false);startPolling()} else {setStartEnabled(true)}
                     }
                 });
             }
@@ -529,24 +554,48 @@ class WC_Product_Sync_Send_Receive {
         if (!$job) {
             wp_send_json_error(array('message' => 'missing_job'));
         }
+        // Sola lettura: il batch gira in una richiesta separata (ajax_tick), altrimenti
+        // questa risposta tornerebbe solo a batch finito e il contatore resterebbe fermo
+        // per minuti pur essendo il sync in corso.
         $st = get_transient('wc_product_sync_progress_' . $job);
         if ($this->is_cancelled($job)) {
             wp_send_json_success(array('status' => 'cancelled', 'total' => isset($st['total']) ? $st['total'] : 0, 'processed' => isset($st['processed']) ? $st['processed'] : 0, 'log' => isset($st['log']) ? $st['log'] : ''));
-        }
-        wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
-        // Drive one batch inline so the job progresses even if wp-cron never fires (loopback blocked / DISABLE_WP_CRON).
-        // run_sync_event holds a per-job lock, so this is safe alongside any cron-triggered run.
-        if ($st && isset($st['status']) && ($st['status'] === 'scheduled' || $st['status'] === 'running')) {
-            $params = get_transient('wc_product_sync_params_' . $job);
-            if (is_array($params)) {
-                $this->run_sync_event($job, $params['dry'], $params['limit'], $params['skip'], $params['gallery_limit'], $params['batch_size'], $params['compress'], !empty($params['price_only_mode']));
-                $st = get_transient('wc_product_sync_progress_' . $job);
-            }
         }
         if (!$st) {
             wp_send_json_success(array('status' => 'unknown', 'total' => 0, 'processed' => 0, 'log' => ''));
         }
         wp_send_json_success($st);
+    }
+
+    /**
+     * Fa avanzare il job di un batch. Richiesta separata dal poll del contatore, cosi'
+     * il browser puo' continuare a leggere il progresso mentre il batch e' in corso.
+     * run_sync_event() tiene un lock per job, quindi convive con il cron senza doppioni.
+     */
+    public function ajax_tick() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'not_allowed'));
+        }
+        check_ajax_referer('wc_product_sync', 'security');
+        $job = isset($_POST['job_id']) ? sanitize_text_field($_POST['job_id']) : '';
+        if (!$job) {
+            wp_send_json_error(array('message' => 'missing_job'));
+        }
+        if ($this->is_cancelled($job)) {
+            wp_send_json_success(array('status' => 'cancelled'));
+        }
+        $st = get_transient('wc_product_sync_progress_' . $job);
+        if (!$st || !isset($st['status']) || ($st['status'] !== 'scheduled' && $st['status'] !== 'running')) {
+            wp_send_json_success(array('status' => $st && isset($st['status']) ? $st['status'] : 'unknown'));
+        }
+        // Sveglia anche il wp-cron: se funziona, i batch avanzano pure senza browser aperto.
+        wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
+        $params = get_transient('wc_product_sync_params_' . $job);
+        if (is_array($params)) {
+            $this->run_sync_event($job, $params['dry'], $params['limit'], $params['skip'], $params['gallery_limit'], $params['batch_size'], $params['compress'], !empty($params['price_only_mode']));
+        }
+        $st = get_transient('wc_product_sync_progress_' . $job);
+        wp_send_json_success(array('status' => $st && isset($st['status']) ? $st['status'] : 'unknown'));
     }
 
     public function ajax_cancel() {
