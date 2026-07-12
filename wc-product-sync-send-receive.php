@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.19
+Version: 2.2.20
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -400,6 +400,7 @@ class WC_Product_Sync_Send_Receive {
                         document.getElementById('wcps-progress-status').textContent='cancelled';
                         job=null;
                         setStartEnabled(true);
+                        if(res.data && res.data.auto_sync_enabled){alert(res.data.message)}
                     }
                     if(btn){btn.disabled=false}
                 }).catch(function(){if(btn){btn.disabled=false}});
@@ -557,6 +558,29 @@ class WC_Product_Sync_Send_Receive {
         if (!$job) {
             wp_send_json_error(array('message' => 'missing_job'));
         }
+        $this->cancel_job($job);
+
+        // Il job automatico (scheduler_tick) ha un id suo: se non lo fermiamo, l'utente
+        // annulla il job manuale e i batch continuano ad arrivare su B.
+        $auto_job = get_option('wc_product_sync_auto_job', '');
+        if (!empty($auto_job) && $auto_job !== $job) {
+            $this->cancel_job($auto_job);
+        }
+
+        delete_user_meta(get_current_user_id(), 'wc_product_sync_current_job');
+
+        $options = get_option('wc_product_sync_sender_settings');
+        $auto_enabled = isset($options['auto_sync_enabled']) && $options['auto_sync_enabled'];
+        wp_send_json_success(array(
+            'status' => 'cancelled',
+            'auto_sync_enabled' => (bool)$auto_enabled,
+            'message' => $auto_enabled
+                ? 'Sync cancelled. Automatic sync is still enabled and will start a new job at the next scheduled time — disable "Enable background automatic sync" in the settings to stop it for good.'
+                : 'Sync cancelled.'
+        ));
+    }
+
+    private function cancel_job($job) {
         // Il flag di annullamento vive in un transient dedicato: il worker riscrive di
         // continuo il transient di progress (anche con status 'running'), quindi tenere
         // il flag li' dentro significava perderlo ogni volta che una run partiva subito
@@ -570,31 +594,56 @@ class WC_Product_Sync_Send_Receive {
         $st['status'] = 'cancelled';
         set_transient('wc_product_sync_progress_' . $job, $st, 12 * HOUR_IN_SECONDS);
 
-        $params = get_transient('wc_product_sync_params_' . $job);
-        if (is_array($params)) {
-            // Toglie di mezzo l'evento cron gia' pianificato per il prossimo batch.
-            wp_clear_scheduled_hook('wc_product_sync_run_event', array(
-                $job,
-                $params['dry'],
-                $params['limit'],
-                $params['skip'],
-                $params['gallery_limit'],
-                $params['batch_size'],
-                $params['compress'],
-                !empty($params['price_only_mode'])
-            ));
-        }
+        $this->unschedule_job_events($job);
         // Senza params il poll del browser non puo' piu' far partire batch inline.
         delete_transient('wc_product_sync_params_' . $job);
 
-        $uid = isset($st['user_id']) ? intval($st['user_id']) : get_current_user_id();
-        delete_user_meta($uid, 'wc_product_sync_current_job');
-        delete_user_meta(get_current_user_id(), 'wc_product_sync_current_job');
-        wp_send_json_success(array('status' => 'cancelled'));
+        $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
+        if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+    }
+
+    /**
+     * Toglie dalla coda cron ogni batch gia' pianificato per questo job.
+     * Cerchiamo per job id invece di ricostruire gli args: il job automatico viene
+     * pianificato con args diversi da quello manuale e wp_clear_scheduled_hook()
+     * richiede una corrispondenza esatta.
+     */
+    private function unschedule_job_events($job) {
+        $crons = _get_cron_array();
+        if (!is_array($crons)) { return; }
+        foreach ($crons as $timestamp => $hooks) {
+            if (!isset($hooks['wc_product_sync_run_event']) || !is_array($hooks['wc_product_sync_run_event'])) { continue; }
+            foreach ($hooks['wc_product_sync_run_event'] as $event) {
+                $args = isset($event['args']) ? $event['args'] : array();
+                if (isset($args[0]) && $args[0] === $job) {
+                    wp_unschedule_event($timestamp, 'wc_product_sync_run_event', $args);
+                }
+            }
+        }
     }
 
     private function cancel_key($job) {
         return 'wc_product_sync_cancelled_' . $job;
+    }
+
+    private function delete_lookup_row($product_id) {
+        global $wpdb;
+        $wpdb->delete($wpdb->prefix . 'wc_product_meta_lookup', array('product_id' => intval($product_id)), array('%d'));
+    }
+
+    /**
+     * Rimuove dalla lookup table di WooCommerce le righe che puntano a post inesistenti.
+     * Restituisce il numero di righe eliminate.
+     */
+    private function purge_orphan_lookup_rows() {
+        global $wpdb;
+        $lookup = $wpdb->prefix . 'wc_product_meta_lookup';
+        $deleted = $wpdb->query(
+            "DELETE lookup FROM {$lookup} AS lookup
+             LEFT JOIN {$wpdb->posts} AS posts ON posts.ID = lookup.product_id
+             WHERE posts.ID IS NULL"
+        );
+        return intval($deleted);
     }
 
     private function is_cancelled($job) {
@@ -670,9 +719,23 @@ class WC_Product_Sync_Send_Receive {
             $products = get_posts($args);
             if (!empty($products)) {
                 foreach ($products as $product_id) {
-                    if (wp_delete_post($product_id, true)) {
+                    // Cancelliamo tramite il data store di WooCommerce: wp_delete_post() da solo
+                    // lascia la riga in wc_product_meta_lookup, e quello SKU orfano fa poi fallire
+                    // ogni nuovo inserimento con "SKU is already present in the lookup table".
+                    $product = wc_get_product($product_id);
+                    if ($product) {
+                        $product->delete(true);
+                        $deleted = !$product->get_id();
+                    } else {
+                        $deleted = (bool) wp_delete_post($product_id, true);
+                    }
+                    if ($deleted) {
+                        $processed_products++;
+                    } else {
+                        wp_delete_post($product_id, true);
                         $processed_products++;
                     }
+                    $this->delete_lookup_row($product_id);
                 }
                 wp_send_json_success(array(
                     'message' => sprintf('Deleted %d images and %d products so far...', $processed_images, $processed_products),
@@ -681,9 +744,11 @@ class WC_Product_Sync_Send_Receive {
                     'processed_products' => $processed_products
                 ));
             } else {
-                // Done with everything
+                // Righe rimaste in lookup da cancellazioni precedenti (o fatte a mano):
+                // finche' ci sono, gli SKU risultano "gia' presenti" e il sync non puo' ricreare i prodotti.
+                $orphans = $this->purge_orphan_lookup_rows();
                 wp_send_json_success(array(
-                    'message' => sprintf('Successfully deleted %d WooCommerce products and %d synced images.', $processed_products, $processed_images),
+                    'message' => sprintf('Successfully deleted %d WooCommerce products and %d synced images. Cleaned %d orphaned SKU lookup rows.', $processed_products, $processed_images, $orphans),
                     'next_step' => 0
                 ));
             }

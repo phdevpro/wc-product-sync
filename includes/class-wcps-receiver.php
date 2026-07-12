@@ -177,8 +177,9 @@ class WCPS_Receiver {
         ));
 
         $ids = array();
+        $imported_ids = array();
         if (isset($data['images']) && is_array($data['images'])) {
-            $ids = self::import_images($data['images']);
+            $ids = self::import_images($data['images'], $imported_ids);
             if (!empty($ids)) {
                 $product->set_image_id($ids[0]);
                 if (count($ids) > 1) {
@@ -200,6 +201,11 @@ class WCPS_Receiver {
         try {
             $product->save();
         } catch (Exception $e) {
+            // Le immagini vengono importate prima del save: se il save fallisce restano
+            // in media library senza prodotto e a ogni tentativo la libreria cresce.
+            foreach ($imported_ids as $orphan_id) {
+                wp_delete_attachment($orphan_id, true);
+            }
             return new WP_Error(
                 'save_failed',
                 sprintf('Save failed for SKU "%s": %s', $sku, $e->getMessage()),
@@ -329,7 +335,12 @@ class WCPS_Receiver {
         return (string)$price_a === $price_b;
     }
 
-    private static function import_images($images) {
+    /**
+     * $imported_ids raccoglie solo gli allegati creati da questa chiamata, cosi' il
+     * chiamante puo' ripulirli se il salvataggio del prodotto poi fallisce.
+     */
+    private static function import_images($images, &$imported_ids = array()) {
+        $imported_ids = array();
         $sorted = $images;
         usort($sorted, function($a, $b) {
             $pa = isset($a['position']) ? intval($a['position']) : 0;
@@ -390,6 +401,7 @@ class WCPS_Receiver {
             
             update_post_meta($attach_id, '_wcps_image_md5', $md5);
             $ids[] = $attach_id;
+            $imported_ids[] = $attach_id;
         }
         return $ids;
     }
