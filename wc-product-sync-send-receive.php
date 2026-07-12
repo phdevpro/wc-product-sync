@@ -4,7 +4,7 @@ Plugin Name: WooCommerce Product Sync
 Plugin URI: https://phdevpro.com
 Description: Syncs products from Site A to Shop B by sending product data—including base64 encoded images—to a custom receiver end
 point on Shop B.
-Version: 2.2.20
+Version: 2.2.21
 Author: Simone Palazzin - PHDEVPRO
 Author URI: https://phdevpro.com
 License: GPL2
@@ -942,16 +942,22 @@ class WC_Product_Sync_Send_Receive {
                         
                         // Dynamically generate 'large' thumbnail if missing and Image is big enough
                         if (!$has_large) {
+                            $max_w = (int) get_option('large_size_w', 1024);
+                            $max_h = (int) get_option('large_size_h', 1024);
                             $editor = wp_get_image_editor($orig_path);
-                            if (!is_wp_error($editor)) {
+                            if (is_wp_error($editor)) {
+                                $log[] = 'Note: attachment ' . $aid . ' cannot be resized (' . $editor->get_error_message() . '), sending original (' . size_format(filesize($orig_path)) . ').';
+                            } elseif ($max_w <= 0 || $max_h <= 0) {
+                                $log[] = 'Note: the "large" image size is disabled in Settings > Media, so nothing can be downscaled. Sending attachment ' . $aid . ' at full size (' . size_format(filesize($orig_path)) . ').';
+                            } else {
                                 $size = $editor->get_size();
-                                $max_w = (int) get_option('large_size_w', 1024);
-                                $max_h = (int) get_option('large_size_h', 1024);
-                                
-                                if ($max_w > 0 && $max_h > 0 && ((isset($size['width']) && $size['width'] > $max_w) || (isset($size['height']) && $size['height'] > $max_h))) {
+                                $w = isset($size['width']) ? (int)$size['width'] : 0;
+                                $h = isset($size['height']) ? (int)$size['height'] : 0;
+
+                                if ($w > $max_w || $h > $max_h) {
                                     $editor->resize($max_w, $max_h, false);
                                     $resized = $editor->save();
-                                    
+
                                     if (!is_wp_error($resized) && isset($resized['path'])) {
                                         $file_path = $resized['path'];
                                         if (!is_array($meta)) { $meta = array(); }
@@ -965,13 +971,16 @@ class WC_Product_Sync_Send_Receive {
                                         wp_update_attachment_metadata($aid, $meta);
                                         $log[] = 'Generated missing "large" size for attachment ' . $aid;
                                         $has_large = true;
+                                    } else {
+                                        $err = is_wp_error($resized) ? $resized->get_error_message() : 'unknown error';
+                                        $log[] = 'Note: could not resize attachment ' . $aid . ' (' . $err . '), sending original (' . size_format(filesize($orig_path)) . ').';
                                     }
+                                } else {
+                                    // Non e' un errore: l'originale e' gia' entro le dimensioni "large",
+                                    // quindi non c'e' niente da comprimere.
+                                    $log[] = 'Attachment ' . $aid . ' is already within ' . $max_w . 'x' . $max_h . ' (' . $w . 'x' . $h . ', ' . size_format(filesize($orig_path)) . '), sending original.';
                                 }
                             }
-                        }
-                        
-                        if (!$has_large) {
-                            $log[] = 'Note: Could not compress attachment ' . $aid . ' (maybe image is already small or format unsupported), using original.';
                         }
                     }
                     
