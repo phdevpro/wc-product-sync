@@ -387,13 +387,22 @@ class WC_Product_Sync_Send_Receive {
             }
             function cancelSync(){
                 if(!job){return}
+                var btn=document.getElementById('wcps-cancel');
+                if(btn){btn.disabled=true}
+                document.getElementById('wcps-progress-status').textContent='Cancelling';
                 var data=new FormData();
                 data.append('action','wc_product_sync_cancel');
                 data.append('security','<?php echo wp_create_nonce('wc_product_sync'); ?>');
                 data.append('job_id',job);
                 fetch(wpAjax,{method:'POST',credentials:'same-origin',body:data}).then(function(r){return r.json()}).then(function(res){
-                    if(res && res.success){document.getElementById('wcps-progress-status').textContent='Cancelling'}
-                });
+                    if(res && res.success){
+                        if(timer){clearTimeout(timer);timer=null}
+                        document.getElementById('wcps-progress-status').textContent='cancelled';
+                        job=null;
+                        setStartEnabled(true);
+                    }
+                    if(btn){btn.disabled=false}
+                }).catch(function(){if(btn){btn.disabled=false}});
             }
             function testReceiver(){
                 var data=new FormData();
@@ -520,6 +529,9 @@ class WC_Product_Sync_Send_Receive {
             wp_send_json_error(array('message' => 'missing_job'));
         }
         $st = get_transient('wc_product_sync_progress_' . $job);
+        if ($this->is_cancelled($job)) {
+            wp_send_json_success(array('status' => 'cancelled', 'total' => isset($st['total']) ? $st['total'] : 0, 'processed' => isset($st['processed']) ? $st['processed'] : 0, 'log' => isset($st['log']) ? $st['log'] : ''));
+        }
         wp_remote_post(site_url('wp-cron.php'), array('timeout' => 0.01, 'blocking' => false));
         // Drive one batch inline so the job progresses even if wp-cron never fires (loopback blocked / DISABLE_WP_CRON).
         // run_sync_event holds a per-job lock, so this is safe alongside any cron-triggered run.
@@ -545,15 +557,62 @@ class WC_Product_Sync_Send_Receive {
         if (!$job) {
             wp_send_json_error(array('message' => 'missing_job'));
         }
+        // Il flag di annullamento vive in un transient dedicato: il worker riscrive di
+        // continuo il transient di progress (anche con status 'running'), quindi tenere
+        // il flag li' dentro significava perderlo ogni volta che una run partiva subito
+        // dopo il click su Cancel.
+        set_transient($this->cancel_key($job), 1, 12 * HOUR_IN_SECONDS);
+
         $st = get_transient('wc_product_sync_progress_' . $job);
         if (!$st) {
             $st = array('status' => 'running', 'total' => 0, 'processed' => 0, 'log' => '');
         }
         $st['status'] = 'cancelled';
         set_transient('wc_product_sync_progress_' . $job, $st, 12 * HOUR_IN_SECONDS);
+
+        $params = get_transient('wc_product_sync_params_' . $job);
+        if (is_array($params)) {
+            // Toglie di mezzo l'evento cron gia' pianificato per il prossimo batch.
+            wp_clear_scheduled_hook('wc_product_sync_run_event', array(
+                $job,
+                $params['dry'],
+                $params['limit'],
+                $params['skip'],
+                $params['gallery_limit'],
+                $params['batch_size'],
+                $params['compress'],
+                !empty($params['price_only_mode'])
+            ));
+        }
+        // Senza params il poll del browser non puo' piu' far partire batch inline.
+        delete_transient('wc_product_sync_params_' . $job);
+
         $uid = isset($st['user_id']) ? intval($st['user_id']) : get_current_user_id();
         delete_user_meta($uid, 'wc_product_sync_current_job');
+        delete_user_meta(get_current_user_id(), 'wc_product_sync_current_job');
         wp_send_json_success(array('status' => 'cancelled'));
+    }
+
+    private function cancel_key($job) {
+        return 'wc_product_sync_cancelled_' . $job;
+    }
+
+    private function is_cancelled($job) {
+        if (get_transient($this->cancel_key($job))) {
+            return true;
+        }
+        $st = get_transient('wc_product_sync_progress_' . $job);
+        return (bool)($st && isset($st['status']) && $st['status'] === 'cancelled');
+    }
+
+    private function finish_cancelled($job) {
+        $st = get_transient('wc_product_sync_progress_' . $job);
+        $uid = ($st && isset($st['user_id'])) ? intval($st['user_id']) : 0;
+        if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+        if (is_array($st)) {
+            $st['status'] = 'cancelled';
+            set_transient('wc_product_sync_progress_' . $job, $st, 12 * HOUR_IN_SECONDS);
+        }
     }
 
     public function ajax_purge_receiver() {
@@ -660,6 +719,8 @@ class WC_Product_Sync_Send_Receive {
     }
 
     public function run_sync_event($job, $dry, $limit, $skip, $gallery_limit = 0, $batch_size = 20, $compress_manual = null, $price_only_mode = false) {
+        // Un evento cron gia' in coda puo' arrivare dopo il click su Cancel: fermiamoci subito.
+        if ($this->is_cancelled($job)) { $this->finish_cancelled($job); return; }
         // Prevent overlapping runs: cron-triggered and poll-triggered invocations of the same job must not run concurrently.
         $lock_key = 'wc_product_sync_lock_' . $job;
         if (get_transient($lock_key)) { return; }
@@ -683,10 +744,13 @@ class WC_Product_Sync_Send_Receive {
         
         $allow_all = $this->receiver_supports_status($shop_b_url, $receiver_api_key);
         $total = $this->count_products($limit, $allow_all);
-        
+
         $processed = ($st0 && isset($st0['processed'])) ? intval($st0['processed']) : 0;
         $started_at = ($st0 && isset($st0['started_at'])) ? intval($st0['started_at']) : time();
         $user_id = ($st0 && isset($st0['user_id'])) ? $st0['user_id'] : 0;
+        // receiver_supports_status()/count_products() sono chiamate lente: l'utente puo'
+        // aver annullato nel frattempo, e questa set_transient riporterebbe lo stato a 'running'.
+        if ($this->is_cancelled($job)) { $this->finish_cancelled($job); return; }
         set_transient('wc_product_sync_progress_' . $job, array('status' => 'running', 'total' => $total, 'processed' => $processed, 'log' => implode("\n", $this->trim_log($log)), 'user_id' => $user_id, 'started_at' => $started_at, 'eta_seconds' => isset($st0['eta_seconds']) ? $st0['eta_seconds'] : 0), 12 * HOUR_IN_SECONDS);
         $remaining = max(0, $total - $processed);
         if ($remaining === 0) {
@@ -707,10 +771,8 @@ class WC_Product_Sync_Send_Receive {
         $args['offset'] = $processed;
         $posts = get_posts($args);
         foreach ($posts as $post) {
-            $st = get_transient('wc_product_sync_progress_' . $job);
-            if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
-                $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
-                if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+            if ($this->is_cancelled($job)) {
+                $this->finish_cancelled($job);
                 return;
             }
             $product = wc_get_product($post->ID);
@@ -899,10 +961,8 @@ class WC_Product_Sync_Send_Receive {
             $this->update_progress($job, $total, $processed, $log);
         }
         if ($processed < $total) {
-            $st = get_transient('wc_product_sync_progress_' . $job);
-            if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
-                $uid = isset($st['user_id']) ? intval($st['user_id']) : 0;
-                if ($uid) { delete_user_meta($uid, 'wc_product_sync_current_job'); }
+            if ($this->is_cancelled($job)) {
+                $this->finish_cancelled($job);
                 return;
             }
             wp_schedule_single_event(time() + 1, 'wc_product_sync_run_event', array($job, $dry, $limit, $skip, $gallery_limit, $batch_size, $compress_manual, $price_only_mode));
@@ -921,8 +981,12 @@ class WC_Product_Sync_Send_Receive {
             $existing_log = get_option('wc_product_sync_sender_log', '');
             update_option('wc_product_sync_sender_log', $err_msg . "\n" . $existing_log);
             
-            // Mark job as failed so UI doesn't hang forever
-            set_transient('wc_product_sync_progress_' . $job, array('status' => 'cancelled', 'total' => 0, 'processed' => 0, 'log' => $err_msg, 'user_id' => 0, 'started_at' => time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
+            // Mark job as failed so UI doesn't hang forever ('error', not 'cancelled':
+            // un fatal non e' un annullamento e non deve sembrarlo nella UI).
+            $st_err = get_transient('wc_product_sync_progress_' . $job);
+            $uid_err = ($st_err && isset($st_err['user_id'])) ? intval($st_err['user_id']) : 0;
+            if ($uid_err) { delete_user_meta($uid_err, 'wc_product_sync_current_job'); }
+            set_transient('wc_product_sync_progress_' . $job, array('status' => 'error', 'total' => ($st_err && isset($st_err['total'])) ? $st_err['total'] : 0, 'processed' => ($st_err && isset($st_err['processed'])) ? $st_err['processed'] : 0, 'log' => $err_msg, 'user_id' => $uid_err, 'started_at' => time(), 'eta_seconds' => 0), 12 * HOUR_IN_SECONDS);
         } finally {
             delete_transient($lock_key);
         }
@@ -930,9 +994,9 @@ class WC_Product_Sync_Send_Receive {
 
     private function update_progress($job, $total, $processed, $log) {
         $st = get_transient('wc_product_sync_progress_' . $job);
-        
+
         // If the job has already been cancelled by the user during this processing step, do not overwrite it back to running.
-        if ($st && isset($st['status']) && $st['status'] === 'cancelled') {
+        if ($this->is_cancelled($job)) {
             return;
         }
 
